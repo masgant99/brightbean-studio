@@ -194,6 +194,36 @@ def subscribe(request, org_id):
         status=StudioCheckoutAttempt.Status.CREATING,
     ).order_by("-created_at").first()
 
+    # Cross-check with Intelligence so a checkout URL we never persisted
+    # locally (e.g. Studio crashed between Stripe.create returning and
+    # the TX2 save, or a sibling Studio deployment shares the same DB
+    # but the local row got deleted) still surfaces as a resume CTA
+    # rather than a fresh "Subscribe" the user can double-pay through.
+    if resumable is None and in_flight is None:
+        try:
+            remote = _client().check_eligibility(external_org_id=str(org_id))
+        except (DeploymentNotAuthorized, IntelligenceClientError):
+            remote = {"eligible": True}
+        if not remote.get("eligible", True):
+            details = (remote.get("details") or {})
+            if remote.get("reason") == "open_checkout" and details.get("checkout_url"):
+                # Surface as a resumable attempt for the template — same
+                # data shape so the existing UI handles it without
+                # branching.
+                resumable = StudioCheckoutAttempt(
+                    organization=request.org,
+                    stripe_session_id=details.get("stripe_session_id") or "",
+                    checkout_url=details["checkout_url"],
+                    status=StudioCheckoutAttempt.Status.OPEN,
+                )
+            elif remote.get("reason") in ("already_active", "pending_activation"):
+                # Edge case: Intelligence sees an active/pending sub
+                # that Studio's local mirror doesn't (race or drift).
+                # Send the user to the playground rather than letting
+                # them pay again — the next playground render will
+                # pick up the live state via /v1/me.
+                return redirect("intelligence:playground", org_id=org_id)
+
     try:
         plans_resp = _client().list_plans()
     except DeploymentNotAuthorized:
@@ -280,12 +310,35 @@ def checkout(request, org_id):
             idempotency_key=idempotency_key,
         )
     except Conflict as exc:
+        # Mark our reserve as expired so the partial-unique slot is
+        # released. (``last_error_code`` doesn't exist on the model —
+        # the previous assignment was a no-op kept only by the
+        # ``update_fields`` skipping it; dropped now to avoid an
+        # AttributeError if a future refactor saves the row unfiltered.)
         attempt.status = StudioCheckoutAttempt.Status.EXPIRED
-        attempt.last_error_code = exc.code or "conflict"
         attempt.save(update_fields=["status", "updated_at"])
-        # If it's "open_checkout" we have an existing URL; show resume.
+
+        # Extract the existing checkout URL from Intelligence's response
+        # body and redirect there directly. Intelligence sets
+        # ``details.checkout_url`` for ``open_checkout`` conflicts (and
+        # ``details.stripe_session_id``), so we can route the user
+        # straight back to the in-flight Stripe Checkout session
+        # instead of bouncing them to a confusing "Another checkout is
+        # in progress" warning.
+        details = ((exc.body or {}).get("details") or {})
+        existing_url = details.get("checkout_url") if exc.code == "open_checkout" else None
+        if existing_url:
+            messages.info(
+                request,
+                "Resuming the checkout your teammate started for this org.",
+            )
+            return redirect(existing_url)
+        # Anything else (already_active, pending_activation, in-progress
+        # creating that hasn't promoted yet) falls back to the subscribe
+        # page where the eligibility-cross-check we added above will
+        # render the right resume / manage UI on the next render.
         messages.warning(
-            request, "Another checkout is already in progress for this org.",
+            request, "Couldn't start checkout: {}".format(exc.code or "conflict"),
         )
         return redirect("intelligence:subscribe", org_id=org_id)
     except (ServiceUnavailable, DeploymentNotAuthorized, IntelligenceClientError) as exc:
