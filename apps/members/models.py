@@ -264,3 +264,47 @@ BUILTIN_ROLE_PERMISSIONS = {
         "manage_media": False,
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Org-level permission model
+# ---------------------------------------------------------------------------
+# The workspace permission system above is workspace-scoped via
+# ``WorkspaceMembership.effective_permissions``. The Intelligence integration
+# needs ORG-scoped permission checks (subscriptions and Stripe billing are
+# tied to the Organization, not any one workspace). Rather than expand the
+# workspace system to do double duty, we introduce a parallel, narrower
+# org-permission table keyed on ``OrgMembership.org_role``.
+#
+# Add new keys here as future features need org-scoped gating.
+
+ORG_PERMISSION_KEYS = (
+    ("manage_intelligence_billing", "Manage Intelligence subscription + billing"),
+    ("use_intelligence", "Use Intelligence tools"),
+)
+
+
+BUILTIN_ORG_PERMISSIONS = {
+    OrgMembership.OrgRole.OWNER: {
+        "manage_intelligence_billing",
+        "use_intelligence",
+    },
+    OrgMembership.OrgRole.ADMIN: {
+        "manage_intelligence_billing",
+        "use_intelligence",
+    },
+    OrgMembership.OrgRole.MEMBER: {
+        "use_intelligence",
+    },
+}
+
+
+def has_org_permission(membership, key):
+    """Return True if ``membership`` grants the given org-permission key.
+
+    ``membership`` is an ``OrgMembership`` or None (e.g., the user has no
+    membership in the org being checked). None always returns False.
+    """
+    if membership is None:
+        return False
+    return key in BUILTIN_ORG_PERMISSIONS.get(membership.org_role, set())
