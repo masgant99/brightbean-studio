@@ -1,28 +1,29 @@
+{% comment %}
+  Lead metric: percentile (the headline number) + a hover tooltip
+  that explains what the rank actually means against the niche
+  distribution. CTR score becomes a secondary readout on the right.
+
+  Tooltip visibility uses the .intel-tooltip-trigger / .intel-tooltip
+  classes defined in playground.html's extra_head — those are
+  hand-written CSS, not Tailwind utilities, so they work even when
+  the Tailwind bundle (theme/static/css/dist/styles.css) hasn't been
+  rebuilt since this partial was added.
+{% endcomment %}
 <div>
-    {# Lead metric: percentile (the headline number) + a hover tooltip
-       that explains what the rank actually means against the niche
-       distribution. Score becomes a secondary readout on the right. #}
     <div class="flex items-end justify-between gap-6">
         <div>
-            <div class="flex items-center gap-1.5">
+            <div class="flex items-center">
                 <div class="text-xs uppercase tracking-wide text-stone-500">Percentile</div>
-                <div class="relative group inline-flex items-center">
-                    <span class="inline-flex w-4 h-4 items-center justify-center rounded-full bg-stone-200 text-stone-500 text-[10px] font-bold cursor-help"
-                          aria-describedby="pkg-percentile-tooltip"
-                          tabindex="0">?</span>
-                    <div id="pkg-percentile-tooltip" role="tooltip"
-                         class="invisible group-hover:visible group-focus-within:visible
-                                absolute bottom-full left-0 mb-2 w-72 p-3 text-xs
-                                text-white bg-stone-900 rounded-lg shadow-lg z-20
-                                leading-relaxed pointer-events-none">
+                <span class="intel-tooltip-trigger" tabindex="0" aria-describedby="pkg-percentile-tooltip">
+                    <span class="intel-tooltip-icon" aria-hidden="true">?</span>
+                    <span id="pkg-percentile-tooltip" role="tooltip" class="intel-tooltip" data-align="left">
                         Where your packaging ranks against other recent videos in
-                        the same niche. <span class="font-semibold">80</span> means
-                        your title + thumbnail combo is predicted to outperform
-                        80% of niche peers; <span class="font-semibold">50</span>
-                        is average; below 30 is a sign to iterate.
-                        <span class="absolute top-full left-3 -mt-px border-4 border-transparent border-t-stone-900"></span>
-                    </div>
-                </div>
+                        the same niche. <strong>80</strong> means your title +
+                        thumbnail combo is predicted to outperform 80% of niche
+                        peers; <strong>50</strong> is average; below 30 is a sign
+                        to iterate.
+                    </span>
+                </span>
             </div>
             <div class="mt-1 text-5xl font-bold tabular-nums" style="color: var(--primary);">{{ result.percentile }}</div>
         </div>
@@ -32,36 +33,35 @@
         </div>
     </div>
 
-    {# Niche match: label + slug + confidence. Confidence is a 0–1
-       float — render as a percentage and color-grade so a low-confidence
-       niche classification (which makes the percentile less meaningful)
-       is visually flagged. #}
+    {% comment %}
+      Niche match: label + slug + confidence. Confidence comes back from
+      the API as a 0–1 float — render via {% widthratio %} to convert
+      to an integer percentage, and color-grade the pill so a
+      low-confidence classification (which makes the percentile less
+      meaningful) is visually flagged. Each pill carries a "?" trigger
+      with its own tooltip explaining the metric.
+    {% endcomment %}
     <div class="mt-5 pt-4 border-t border-stone-100">
         <div class="flex items-center justify-between gap-3">
             <div class="text-xs uppercase tracking-wide text-stone-500">Niche match</div>
             {% with conf=result.niche_confidence %}
             {% if conf is not None %}
-            <div class="relative group inline-flex items-center gap-1.5">
+            <div class="flex items-center gap-1">
                 <span class="text-[11px] font-mono tabular-nums px-1.5 py-0.5 rounded
                              {% if conf >= 0.75 %}bg-green-50 text-green-700
                              {% elif conf >= 0.5 %}bg-amber-50 text-amber-700
                              {% else %}bg-stone-100 text-stone-600{% endif %}">
                     {% widthratio conf 1 100 %}% confidence
                 </span>
-                <span class="inline-flex w-4 h-4 items-center justify-center rounded-full bg-stone-200 text-stone-500 text-[10px] font-bold cursor-help"
-                      aria-describedby="pkg-confidence-tooltip"
-                      tabindex="0">?</span>
-                <div id="pkg-confidence-tooltip" role="tooltip"
-                     class="invisible group-hover:visible group-focus-within:visible
-                            absolute bottom-full right-0 mb-2 w-72 p-3 text-xs
-                            text-white bg-stone-900 rounded-lg shadow-lg z-20
-                            leading-relaxed pointer-events-none">
-                    How confident the classifier is that your packaging belongs to
-                    this niche. Below ~50% the percentile above is less reliable —
-                    you may be in a niche the model doesn't have strong distribution
-                    data for yet.
-                    <span class="absolute top-full right-3 -mt-px border-4 border-transparent border-t-stone-900"></span>
-                </div>
+                <span class="intel-tooltip-trigger" tabindex="0" aria-describedby="pkg-confidence-tooltip">
+                    <span class="intel-tooltip-icon" aria-hidden="true">?</span>
+                    <span id="pkg-confidence-tooltip" role="tooltip" class="intel-tooltip" data-align="right">
+                        How confident the classifier is that your packaging
+                        belongs to this niche. Below ~50% the percentile above
+                        is less reliable — you may be in a niche the model
+                        doesn't have strong distribution data for yet.
+                    </span>
+                </span>
             </div>
             {% endif %}
             {% endwith %}
