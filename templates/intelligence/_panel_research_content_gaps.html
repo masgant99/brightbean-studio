@@ -21,13 +21,15 @@
                     {{ content_gap_niches|json_script:"cg-niche-data" }}
                     <div id="cg-niche-combobox" class="relative">
                         <input type="hidden" name="niche" id="cg-niche" required>
-                        {# The trigger reuses .intel-input for chrome (border,
-                           padding, hover, focus ring) but .intel-input sets
-                           ``display: block`` which would push the chevron
-                           below the label on its own line. Inline-style the
-                           flex layout so the label + chevron sit on one row
-                           regardless of when .intel-input is parsed relative
-                           to the Tailwind ``flex`` utility. #}
+                        {% comment %}
+                          The trigger reuses .intel-input for chrome (border,
+                          padding, hover, focus ring) but .intel-input sets
+                          ``display: block`` which would push the chevron
+                          below the label on its own line. Inline-style the
+                          flex layout so the label + chevron sit on one row
+                          regardless of when .intel-input is parsed relative
+                          to the Tailwind ``flex`` utility.
+                        {% endcomment %}
                         <button type="button" id="cg-niche-trigger"
                                 role="combobox"
                                 aria-haspopup="listbox"
