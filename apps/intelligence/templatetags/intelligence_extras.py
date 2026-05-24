@@ -83,6 +83,25 @@ def humanize_count(value):
 
 
 @register.filter
+def from_cents(value):
+    """Convert an integer cent amount into a dollar string.
+
+    ``1900`` → ``"19"``, ``9900`` → ``"99"``, ``9950`` → ``"99.50"``.
+    Whole-dollar amounts render without trailing zeros so the price
+    blocks stay compact on the pricing cards. Returns an empty string
+    on non-numeric input rather than ``None``-y filter output.
+    """
+    try:
+        cents = int(value)
+    except (TypeError, ValueError):
+        return ""
+    dollars, rem = divmod(cents, 100)
+    if rem == 0:
+        return str(dollars)
+    return f"{dollars}.{rem:02d}"
+
+
+@register.filter
 def pretty_percent(value, decimals=1):
     """Render a 0–1 float as ``XX.X%`` (default 1 decimal place).
 

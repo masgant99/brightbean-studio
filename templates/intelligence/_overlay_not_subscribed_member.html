@@ -1,9 +1,21 @@
-{% comment %}Role: member — no Activate button.{% endcomment %}
-<div class="absolute inset-0 flex items-center justify-center bg-white/85 backdrop-blur-sm rounded-lg">
-  <div class="text-center max-w-md px-6">
-    <h2 class="text-lg font-semibold text-stone-900 mb-2">Intelligence isn't activated yet</h2>
-    <p class="text-sm text-stone-600">
-      Ask an org admin to activate Intelligence for {{ organization.name }}.
-    </p>
-  </div>
+{% comment %}
+  Non-admin overlay — same dimmed-playground background as the admin
+  variant, but no Activate CTA (they can't buy on the org's behalf).
+{% endcomment %}
+<div class="absolute inset-0 flex items-center justify-center bg-gradient-to-b from-white/95 to-white/85 backdrop-blur-[2px] rounded-xl p-6">
+    <div class="max-w-md w-full text-center">
+        <div class="rounded-2xl border border-stone-200 bg-white shadow-lg p-8">
+            <div class="inline-flex items-center justify-center w-12 h-12 rounded-full mb-4"
+                 style="background: var(--primary-soft, #fff7ed); color: var(--primary);">
+                <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+            </div>
+            <h2 class="text-lg font-semibold text-stone-900 mb-2">Intelligence isn't activated yet</h2>
+            <p class="text-sm text-stone-600 leading-relaxed">
+                Ask an owner or admin of <strong>{{ organization.name }}</strong> to activate Intelligence for the org.
+            </p>
+            <p class="mt-3 text-xs text-stone-400 leading-relaxed">
+                You're seeing a preview of what becomes available once it's activated.
+            </p>
+        </div>
+    </div>
 </div>
