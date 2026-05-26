@@ -159,7 +159,14 @@ class StudioCheckoutAttempt(models.Model):
         default="",
         db_index=True,
     )
-    checkout_url = models.URLField(blank=True, default="")
+    # Stripe's hosted Checkout URL includes the session id PLUS a long
+    # base64-ish fragment carrying the client_secret + payment_page state
+    # — total length runs ~500-1000+ characters. Django's URLField defaults
+    # to max_length=200, which silently truncates Postgres writes and raises
+    # ``psycopg.errors.StringDataRightTruncation`` on save. 2000 is enough
+    # headroom for any Stripe URL we've seen and is the de-facto convention
+    # for URL columns in Django apps that talk to Stripe.
+    checkout_url = models.URLField(max_length=2000, blank=True, default="")
     expires_at = models.DateTimeField(null=True, blank=True)
     idempotency_key = models.CharField(max_length=255, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
