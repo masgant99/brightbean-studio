@@ -449,6 +449,65 @@ def checkout(request, org_id):
     return redirect(resp["checkout_url"])
 
 
+@require_POST
+@require_org_permission("manage_intelligence_billing")
+def discard_checkout(request, org_id):
+    """Cancel an in-progress checkout attempt.
+
+    Frees the partial-unique slot so the user can pick a different plan.
+    Calls Intelligence ``/studio-checkout-session/cancel`` first so the
+    authoritative remote row is closed (and the Stripe session expired)
+    BEFORE the local mirror flips to canceled — otherwise the next
+    ``/subscribe/`` render would still see ``open_checkout`` from the
+    cross-check at ``subscribe()`` and resurrect the resume card.
+
+    On Intelligence reachability failure we leave the local row
+    untouched and surface an error message; reattempting later is safe
+    because the cancel call is idempotent.
+    """
+    attempt = (
+        StudioCheckoutAttempt.objects.filter(
+            organization=request.org,
+            status__in=[
+                StudioCheckoutAttempt.Status.CREATING,
+                StudioCheckoutAttempt.Status.OPEN,
+                StudioCheckoutAttempt.Status.PENDING,
+            ],
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if attempt is None:
+        messages.info(request, "No checkout to discard.")
+        return redirect("intelligence:subscribe", org_id=org_id)
+
+    try:
+        _client().cancel_studio_checkout_session(
+            external_org_id=str(request.org.id),
+            stripe_session_id=attempt.stripe_session_id or None,
+            idempotency_key=f"cancel-{attempt.id}",
+        )
+    except Conflict:
+        # Remote already terminal (activated/canceled). Local mirror is
+        # the only thing left to reconcile.
+        pass
+    except (ServiceUnavailable, DeploymentNotAuthorized, IntelligenceClientError):
+        logger.exception("cancel_studio_checkout_session failed")
+        messages.error(
+            request,
+            "We couldn't reach the billing service. Try again in a moment.",
+        )
+        return redirect("intelligence:subscribe", org_id=org_id)
+
+    with transaction.atomic():
+        attempt.status = StudioCheckoutAttempt.Status.CANCELED
+        attempt.consumed_at = timezone.now()
+        attempt.save(update_fields=["status", "consumed_at", "updated_at"])
+
+    messages.info(request, "Checkout discarded. Pick a plan to start a new one.")
+    return redirect("intelligence:subscribe", org_id=org_id)
+
+
 # ---------------------------------------------------------------------------
 # Activate, Stripe success URL handler
 # ---------------------------------------------------------------------------

@@ -34,11 +34,22 @@
             <p class="text-sm mt-1 text-stone-700">
                 Someone in your org already started a checkout for this organization.
             </p>
-            <a href="{{ resumable_attempt.checkout_url }}"
-               class="intel-cta-primary mt-3">
-                Continue to Stripe
-                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-            </a>
+            <div class="mt-3 flex items-center gap-2 flex-wrap">
+                <a href="{{ resumable_attempt.checkout_url }}"
+                   class="intel-cta-primary">
+                    Continue to Stripe
+                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+                </a>
+                <form method="post"
+                      action="{% url 'intelligence:discard-checkout' org_id=organization.id %}"
+                      class="inline-block">
+                    {% csrf_token %}
+                    <button type="submit"
+                            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-stone-600 bg-white border border-stone-300 rounded-full hover:bg-stone-50">
+                        Discard Checkout Session
+                    </button>
+                </form>
+            </div>
         </div>
     </div>
     {% elif in_flight_attempt %}
@@ -51,7 +62,7 @@
             </p>
         </div>
     </div>
-    {% endif %}
+    {% else %}
 
     <form method="post" action="{% url 'intelligence:checkout' org_id=organization.id %}" class="space-y-8">
         {% csrf_token %}
@@ -189,6 +200,7 @@
             </button>
         </div>
     </form>
+    {% endif %}
 </div>
 {% endblock %}
 

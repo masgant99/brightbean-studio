@@ -18,6 +18,7 @@ org_scoped_patterns = [
     path("", views.playground, name="playground"),
     path("subscribe/", views.subscribe, name="subscribe"),
     path("checkout/", views.checkout, name="checkout"),
+    path("discard-checkout/", views.discard_checkout, name="discard-checkout"),
     path("recover/", views.recover, name="recover"),
     path("portal/", views.portal, name="portal"),
     path("billing-settings/", views.billing_settings, name="billing-settings"),

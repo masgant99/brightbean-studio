@@ -145,6 +145,30 @@ class InternalClient:
             idempotency_key=idempotency_key,
         )
 
+    def cancel_studio_checkout_session(
+        self,
+        *,
+        external_org_id: str,
+        stripe_session_id: str | None,
+        idempotency_key: str,
+    ) -> dict:
+        # 404 means Intelligence has no matching open attempt (already
+        # expired by Stripe webhook, never persisted on their side, etc).
+        # Treat as a successful no-op so Studio can still cancel its local
+        # mirror — a stale Studio row must never block the discard UX.
+        try:
+            return self._request(
+                "POST",
+                "/studio-checkout-session/cancel",
+                body={
+                    "external_org_id": external_org_id,
+                    "stripe_session_id": stripe_session_id,
+                },
+                idempotency_key=idempotency_key,
+            )
+        except NotFound:
+            return {}
+
     def activate_preflight(
         self,
         *,
