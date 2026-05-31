@@ -212,9 +212,7 @@ def _grantable_permissions(user, workspace) -> list[tuple[str, str]]:
         return []
     held = {k for k, v in membership.effective_permissions.items() if v}
     return [
-        (k, k.replace("_", " ").capitalize())
-        for k in PERMISSION_KEYS
-        if k in held and k not in _HIDDEN_FROM_ISSUANCE
+        (k, k.replace("_", " ").capitalize()) for k in PERMISSION_KEYS if k in held and k not in _HIDDEN_FROM_ISSUANCE
     ]
 
 
