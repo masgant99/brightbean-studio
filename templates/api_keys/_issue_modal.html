@@ -1,7 +1,9 @@
-{# Issuance modal — Alpine for open/close, HTMX for the cascading workspace
-   → accounts + permissions partial. The actual POST is a normal Django
-   form submit (no HTMX) so the response can render the one-time token
-   reveal modal on top of the freshly-rendered list page. #}
+{% comment %}
+Issuance modal — Alpine for open/close, HTMX for the cascading workspace
+→ accounts + permissions partial. The actual POST is a normal Django
+form submit (no HTMX) so the response can render the one-time token
+reveal modal on top of the freshly-rendered list page.
+{% endcomment %}
 <template x-teleport="body">
     <div x-show="showIssueModal" x-transition.opacity
          @keydown.escape.window="showIssueModal = false"
