@@ -279,7 +279,7 @@ CSP_SCRIPT_SRC = ("'self'", "'unsafe-eval'", "https://cdn.jsdelivr.net")
 CSP_STYLE_SRC = ("'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net")
 CSP_IMG_SRC = ("'self'", "data:", "blob:", "https:")
 CSP_FONT_SRC = ("'self'",)
-CSP_CONNECT_SRC = ("'self'",)
+CSP_CONNECT_SRC = ("'self'", "https://cdn.jsdelivr.net")
 CSP_MEDIA_SRC = ("'self'", "blob:")
 CSP_FORM_ACTION = (
     "'self'",
