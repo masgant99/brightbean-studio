@@ -14,11 +14,16 @@
             {# Account switcher #}
             <div x-data="{ open: false }" style="position: relative;">
                 <button type="button" @click="open = !open" style="display: flex; align-items: center; gap: 10px; padding: 6px 10px 6px 8px; background: #fff; border: 1px solid var(--border); border-radius: var(--radius-full); cursor: pointer;">
-                    {% if active_account.avatar_url %}
-                        <img src="{{ active_account.avatar_url }}" alt="" style="width: 32px; height: 32px; border-radius: 50%; object-fit: cover;">
-                    {% else %}
-                        <div style="width: 32px; height: 32px; border-radius: 50%; background: var(--neutral-200); display: flex; align-items: center; justify-content: center; font-weight: 700; color: var(--text-secondary);">{{ active_account.account_name|make_list|first|upper }}</div>
-                    {% endif %}
+                    <div class="relative flex-shrink-0">
+                        {% if active_account.avatar_url %}
+                            <img src="{{ active_account.avatar_url }}" alt="" style="width: 32px; height: 32px; border-radius: 50%; object-fit: cover;">
+                        {% else %}
+                            <div style="width: 32px; height: 32px; border-radius: 50%; background: var(--neutral-200); display: flex; align-items: center; justify-content: center; font-weight: 700; color: var(--text-secondary);">{{ active_account.account_name|make_list|first|upper }}</div>
+                        {% endif %}
+                        <div class="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-white rounded-full flex items-center justify-center">
+                            {% include "partials/_platform_icon.html" with platform=active_account.platform size="sm" %}
+                        </div>
+                    </div>
                     <span style="text-align: left;">
                         <span style="display: block; font-size: 0.875rem; font-weight: 600; color: var(--neutral-900); line-height: 1.1;">{{ active_account.account_name }}</span>
                         <span style="display: block; font-size: 0.6875rem; color: var(--text-tertiary);">@{{ active_account.account_handle }}</span>
@@ -31,11 +36,16 @@
                     {% for acc in accounts %}
                         <a href="{% url 'analytics:account' workspace_id=workspace.id account_id=acc.id %}"
                            style="display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: {% if acc.id == active_account.id %}var(--surface-1){% else %}none{% endif %}; border-radius: var(--radius-md); text-decoration: none; color: inherit;">
-                            {% if acc.avatar_url %}
-                                <img src="{{ acc.avatar_url }}" alt="" style="width: 30px; height: 30px; border-radius: 50%; object-fit: cover;">
-                            {% else %}
-                                <div style="width: 30px; height: 30px; border-radius: 50%; background: var(--neutral-200); display: flex; align-items: center; justify-content: center; font-weight: 700; color: var(--text-secondary);">{{ acc.account_name|make_list|first|upper }}</div>
-                            {% endif %}
+                            <div class="relative flex-shrink-0">
+                                {% if acc.avatar_url %}
+                                    <img src="{{ acc.avatar_url }}" alt="" style="width: 30px; height: 30px; border-radius: 50%; object-fit: cover;">
+                                {% else %}
+                                    <div style="width: 30px; height: 30px; border-radius: 50%; background: var(--neutral-200); display: flex; align-items: center; justify-content: center; font-weight: 700; color: var(--text-secondary);">{{ acc.account_name|make_list|first|upper }}</div>
+                                {% endif %}
+                                <div class="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-white rounded-full flex items-center justify-center">
+                                    {% include "partials/_platform_icon.html" with platform=acc.platform size="sm" %}
+                                </div>
+                            </div>
                             <span style="flex: 1; min-width: 0;">
                                 <span style="display: block; font-size: 0.8125rem; font-weight: 600; color: var(--neutral-900); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ acc.account_name }}</span>
                                 <span style="display: block; font-size: 0.6875rem; color: var(--text-tertiary);">{{ acc.follower_count|intcomma }} followers</span>
