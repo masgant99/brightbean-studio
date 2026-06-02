@@ -79,7 +79,4 @@ class LinkedInPersonalProvider(LinkedInProvider):
         )
 
     def get_account_metrics(self, access_token: str, date_range):
-        raise NotImplementedError(
-            "LinkedIn does not expose personal-profile account analytics via the "
-            "REST API."
-        )
+        raise NotImplementedError("LinkedIn does not expose personal-profile account analytics via the REST API.")
