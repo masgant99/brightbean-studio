@@ -65,6 +65,11 @@
                 });
         }
         window.openPost = openPost;
+
+        document.querySelector('.analytics-shell').addEventListener('click', (e) => {
+            const row = e.target.closest('tr[data-post-url]');
+            if (row) openPost(row.dataset.postUrl);
+        });
     </script>
 </div>
 {% endblock %}

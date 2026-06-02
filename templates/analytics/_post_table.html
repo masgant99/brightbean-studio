@@ -72,7 +72,7 @@
             </thead>
             <tbody>
                 {% for r in table.rows %}
-                <tr onclick="openPost('{% url 'analytics:post_detail' workspace_id=workspace.id post_id=r.post.id %}')">
+                <tr data-post-url="{% url 'analytics:post_detail' workspace_id=workspace.id post_id=r.post.id %}" style="cursor: pointer;">
                     <td class="first">
                         <div style="display: flex; align-items: center; gap: 10px;">
                             {% if r.thumbnail_url %}
