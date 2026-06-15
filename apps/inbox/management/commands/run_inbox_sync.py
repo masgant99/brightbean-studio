@@ -42,8 +42,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS("Inbox sync worker started."))
 
         while running:
-            engine.sync_all()
-            engine.check_sla()
+            engine.run_cycle()
 
             if once:
                 break

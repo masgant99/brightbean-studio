@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_MINUTES = [1, 5, 30]
+# Cap how many deliveries a single retry sweep processes, so a PENDING backlog
+# that accumulated before the periodic retry was scheduled drains gradually
+# across runs instead of bursting all at once.
+RETRY_BATCH_LIMIT = 200
 
 # Default channel enablement per event type.
 # Key: event_type, Value: dict of channel → default enabled.
@@ -327,12 +331,16 @@ def retry_failed_deliveries() -> int:
     Returns the count of retried deliveries.
     """
     now = timezone.now()
-    pending = NotificationDelivery.objects.filter(
-        status=DeliveryStatus.PENDING,
-        next_retry_at__isnull=False,
-        next_retry_at__lte=now,
-        attempts__lt=MAX_RETRY_ATTEMPTS,
-    ).select_related("notification", "notification__user")
+    pending = (
+        NotificationDelivery.objects.filter(
+            status=DeliveryStatus.PENDING,
+            next_retry_at__isnull=False,
+            next_retry_at__lte=now,
+            attempts__lt=MAX_RETRY_ATTEMPTS,
+        )
+        .select_related("notification", "notification__user")
+        .order_by("next_retry_at")[:RETRY_BATCH_LIMIT]
+    )
 
     count = 0
     for delivery in pending:

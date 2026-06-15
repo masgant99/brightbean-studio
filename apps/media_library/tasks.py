@@ -195,3 +195,24 @@ def sweep_pending_uploads():
         with contextlib.suppress(Exception):
             delete_object(pending.storage_key)
         pending.delete()
+
+
+# How often the recurring orphaned-media sweep runs; registered on a repeating
+# schedule by apps.media_library.apps.MediaLibraryConfig. Replaces the daily
+# docker-compose ``maintenance`` loop so it runs on every deploy target.
+ORPHANED_MEDIA_SWEEP_INTERVAL_SECONDS = 24 * 60 * 60  # daily
+
+
+@background(schedule=0)
+def run_orphaned_media_sweep():
+    """Delete media assets no longer referenced by any post, idea, or template.
+
+    Wraps ``services.sweep_orphaned_media`` (the same code path as the
+    ``cleanup_orphaned_media`` command) so the cleanup runs on the shared
+    ``process_tasks`` worker everywhere, not just the VPS maintenance container.
+    """
+    from .services import sweep_orphaned_media
+
+    # min_age_days falls through to services.ORPHANED_MEDIA_MIN_AGE_DAYS (the
+    # single source), matching the management command's default.
+    sweep_orphaned_media(log=logger.info)

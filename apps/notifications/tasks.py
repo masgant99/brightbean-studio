@@ -6,6 +6,7 @@ These are meant to be called by django-background-tasks or a cron schedule.
 import logging
 from datetime import timedelta
 
+from background_task import background
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
@@ -64,10 +65,18 @@ def send_daily_digests():
             logger.exception("Failed to send daily digest to %s", user.email)
 
 
+# How often the recurring delivery-retry sweep runs; registered on a repeating
+# schedule by apps.notifications.apps.NotificationsConfig.
+NOTIFICATION_RETRY_INTERVAL_SECONDS = 60  # every minute
+
+
+@background(schedule=0)
 def retry_failed_deliveries():
     """Retry pending notification deliveries that are past their backoff window.
 
-    Should be scheduled to run every minute.
+    Registered on a 1-minute repeating schedule. ``notify()`` dispatches the
+    first attempt inline; transient email/webhook failures leave the delivery
+    PENDING with a ``next_retry_at`` that only this sweep acts on.
     """
     from .engine import retry_failed_deliveries as _retry
 

@@ -5,10 +5,15 @@ import logging
 import os
 import subprocess
 import tempfile
+import uuid
+from datetime import timedelta
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
+from django.db import connection
+from django.db.models import Sum
+from django.utils import timezone
 
 from .models import MediaAsset, MediaAssetVersion, MediaFolder
 from .validators import validate_file
@@ -223,7 +228,9 @@ def inspect_uploaded_object(pending) -> dict:
     return {"size": size, "media_type": file_type, "mime": mime}
 
 
-def register_uploaded_asset(*, pending, inspected, uploaded_by, folder=None, alt_text: str = "", title: str = "", tags=None):
+def register_uploaded_asset(
+    *, pending, inspected, uploaded_by, folder=None, alt_text: str = "", title: str = "", tags=None
+):
     """Create a ``MediaAsset`` for an already-stored object from validated metadata.
 
     ``inspected`` is the dict returned by :func:`inspect_uploaded_object`. This
@@ -613,3 +620,189 @@ def trim_video(input_path, output_path, start_seconds, end_seconds):
     )
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg trim failed: {result.stderr.decode()}")
+
+
+# Minimum asset age (days) the orphaned-media sweep considers — the single source
+# shared by the management command's default and the recurring background task.
+ORPHANED_MEDIA_MIN_AGE_DAYS = 14
+
+
+def sweep_orphaned_media(
+    *, min_age_days=ORPHANED_MEDIA_MIN_AGE_DAYS, batch_size=100, dry_run=False, log=None, should_continue=None
+):
+    """Detect and delete media assets not referenced by any post, idea, or template.
+
+    Orphans are ``MediaAsset`` rows older than ``min_age_days`` that no foreign
+    key or JSON field points at. Shared by the ``cleanup_orphaned_media``
+    management command and the recurring background task so the two never drift.
+
+    Args:
+        min_age_days: only consider assets older than this (default 14).
+        batch_size: delete in batches of this many.
+        dry_run: when True, report candidates without deleting.
+        log: optional ``callable(str)`` for progress lines (defaults to the
+            module logger at debug level).
+        should_continue: optional ``callable() -> bool``; deletion stops early
+            when it returns False (lets the command honor SIGINT/SIGTERM).
+
+    Returns a dict: ``{orphaned, deleted, skipped, errors, bytes}``.
+    """
+    emit = log or (lambda msg: logger.debug("%s", msg))
+    keep_going = should_continue or (lambda: True)
+
+    cutoff = timezone.now() - timedelta(days=min_age_days)
+    emit(f"Scanning assets older than {min_age_days} days (cutoff: {cutoff:%Y-%m-%d %H:%M})")
+
+    referenced = _fk_referenced_asset_ids() | _json_referenced_asset_ids()
+    emit(f"Referenced assets: {len(referenced)}")
+
+    orphaned_qs = MediaAsset.objects.filter(created_at__lt=cutoff).exclude(id__in=referenced)
+    orphaned_ids = list(orphaned_qs.values_list("id", flat=True))
+    total = len(orphaned_ids)
+    total_bytes = orphaned_qs.aggregate(total=Sum("file_size"))["total"] or 0
+
+    result = {"orphaned": total, "deleted": 0, "skipped": 0, "errors": 0, "bytes": total_bytes}
+
+    if total == 0:
+        emit("No orphaned assets found.")
+        return result
+
+    emit(f"Orphaned candidates: {total} (~{total_bytes / (1024 * 1024):.1f} MB)")
+
+    if dry_run:
+        for asset in MediaAsset.objects.filter(id__in=orphaned_ids[:50]):
+            emit(
+                f"  Would delete: {asset.id} ({asset.filename}, {asset.media_type}, "
+                f"{asset.file_size / (1024 * 1024):.1f} MB, created {asset.created_at:%Y-%m-%d})"
+            )
+        if total > 50:
+            emit(f"  ... and {total - 50} more")
+        return result
+
+    for i in range(0, total, batch_size):
+        if not keep_going():
+            emit("Interrupted, stopping...")
+            break
+        for asset in MediaAsset.objects.filter(id__in=orphaned_ids[i : i + batch_size]):
+            if not keep_going():
+                break
+            try:
+                asset_info = f"{asset.id} ({asset.filename})"
+                delete_asset(asset)
+                result["deleted"] += 1
+                emit(f"Deleted: {asset_info}")
+            except ProtectedAssetError:
+                result["skipped"] += 1
+                emit(f"Skipped (protected): {asset.id}")
+            except Exception as exc:
+                result["errors"] += 1
+                emit(f"Error deleting {asset.id}: {exc}")
+
+    emit(
+        f"Complete: {result['deleted']} deleted, {result['skipped']} skipped, "
+        f"{result['errors']} errors (of {total} orphaned)"
+    )
+    return result
+
+
+def _fk_referenced_asset_ids():
+    """Collect all asset IDs referenced via foreign keys."""
+    from apps.composer.models import Idea, IdeaMedia, PostMedia
+
+    referenced = set()
+    referenced.update(PostMedia.objects.values_list("media_asset_id", flat=True))
+    referenced.update(IdeaMedia.objects.values_list("media_asset_id", flat=True))
+    referenced.update(Idea.objects.filter(media_asset__isnull=False).values_list("media_asset_id", flat=True))
+    return referenced
+
+
+def _json_referenced_asset_ids():
+    """Collect all asset IDs embedded in JSON fields."""
+    if connection.vendor == "postgresql":
+        return _json_referenced_asset_ids_postgres()
+    return _json_referenced_asset_ids_python()
+
+
+def _json_referenced_asset_ids_postgres():
+    """Extract asset IDs from JSON fields using PostgreSQL jsonb functions."""
+    referenced = set()
+
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT DISTINCT platform_extra->>'thumbnail_asset_id'
+            FROM composer_platform_post
+            WHERE platform_extra IS NOT NULL
+              AND platform_extra->>'thumbnail_asset_id' IS NOT NULL
+        """)
+        for (val,) in cursor.fetchall():
+            referenced.add(_to_uuid(val))
+
+        cursor.execute("""
+            SELECT DISTINCT platform_extra->>'cover_image_asset_id'
+            FROM composer_platform_post
+            WHERE platform_extra IS NOT NULL
+              AND platform_extra->>'cover_image_asset_id' IS NOT NULL
+        """)
+        for (val,) in cursor.fetchall():
+            referenced.add(_to_uuid(val))
+
+        cursor.execute("""
+            SELECT DISTINCT elem::text
+            FROM composer_platform_post,
+                 jsonb_array_elements_text(platform_specific_media) AS elem
+            WHERE platform_specific_media IS NOT NULL
+              AND jsonb_typeof(platform_specific_media) = 'array'
+        """)
+        for (val,) in cursor.fetchall():
+            referenced.add(_to_uuid(val))
+
+        cursor.execute("""
+            SELECT DISTINCT elem::text
+            FROM composer_post_template,
+                 jsonb_array_elements_text(template_data->'media_asset_ids') AS elem
+            WHERE template_data IS NOT NULL
+              AND template_data ? 'media_asset_ids'
+              AND jsonb_typeof(template_data->'media_asset_ids') = 'array'
+        """)
+        for (val,) in cursor.fetchall():
+            referenced.add(_to_uuid(val))
+
+    referenced.discard(None)
+    return referenced
+
+
+def _json_referenced_asset_ids_python():
+    """Extract asset IDs from JSON fields by iterating in Python (SQLite fallback)."""
+    from apps.composer.models import PlatformPost, PostTemplate
+
+    referenced = set()
+
+    for pp in PlatformPost.objects.exclude(platform_extra=None).only("platform_extra"):
+        extra = pp.platform_extra or {}
+        if extra.get("thumbnail_asset_id"):
+            referenced.add(_to_uuid(extra["thumbnail_asset_id"]))
+        if extra.get("cover_image_asset_id"):
+            referenced.add(_to_uuid(extra["cover_image_asset_id"]))
+
+    for pp in PlatformPost.objects.exclude(platform_specific_media=None).only("platform_specific_media"):
+        if isinstance(pp.platform_specific_media, list):
+            for val in pp.platform_specific_media:
+                referenced.add(_to_uuid(val))
+
+    for tmpl in PostTemplate.objects.exclude(template_data=None).only("template_data"):
+        data = tmpl.template_data or {}
+        for val in data.get("media_asset_ids", []):
+            referenced.add(_to_uuid(val))
+
+    referenced.discard(None)
+    return referenced
+
+
+def _to_uuid(val):
+    """Safely convert a string to UUID, returning None on failure."""
+    if not val:
+        return None
+    try:
+        return uuid.UUID(str(val))
+    except (ValueError, AttributeError):
+        return None

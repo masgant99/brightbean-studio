@@ -3,6 +3,7 @@
 import logging
 from datetime import timedelta
 
+from background_task import background
 from django.utils import timezone
 
 from apps.composer.models import Post
@@ -165,3 +166,18 @@ def _escalate(post, stage):
                 "stage": stage,
             },
         )
+
+
+# How often the recurring approval-reminder check runs; registered on a repeating
+# schedule by apps.approvals.apps.ApprovalsConfig.
+APPROVAL_REMINDER_INTERVAL_SECONDS = 60 * 60  # hourly
+
+
+@background(schedule=0)
+def run_approval_reminders_cycle():
+    """Send reminders/escalations for stalled approvals (registered hourly).
+
+    Wraps ``check_approval_reminders`` so the plain function stays callable
+    synchronously from the ``run_approval_reminders`` command and from tests.
+    """
+    check_approval_reminders()

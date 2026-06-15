@@ -1,7 +1,9 @@
 """Inbox sync engine - polls connected accounts for new messages."""
 
 import logging
+from datetime import timedelta
 
+from background_task import background
 from django.utils import timezone
 
 from apps.members.models import WorkspaceMembership
@@ -15,9 +17,33 @@ from .sentiment import analyze_sentiment
 
 logger = logging.getLogger(__name__)
 
+# On an account's first-ever sync we may pull a historical backlog; notifications
+# are suppressed for it, EXCEPT messages newer than this window — so a long-quiet
+# account's genuinely-new first message still alerts instead of being swallowed.
+INBOX_BACKLOG_NOTIFY_WINDOW = timedelta(hours=1)
+
+
+def _is_recent(ts):
+    """True if a provider message timestamp falls within the backlog-notify window."""
+    if ts is None:
+        return False
+    if timezone.is_naive(ts):
+        ts = timezone.make_aware(ts, timezone.get_default_timezone())
+    return ts >= timezone.now() - INBOX_BACKLOG_NOTIFY_WINDOW
+
 
 class InboxSyncEngine:
     """Syncs inbox messages from all connected social accounts."""
+
+    def run_cycle(self):
+        """Run one full inbox cycle: poll every connected account, then check SLAs.
+
+        Single shared entry point for the ``run_inbox_sync`` management command
+        and the recurring ``run_inbox_sync_cycle`` background task, so the two
+        never diverge.
+        """
+        self.sync_all()
+        self.check_sla()
 
     def sync_all(self):
         """Poll each connected account for new messages."""
@@ -45,6 +71,7 @@ class InboxSyncEngine:
             .values_list("received_at", flat=True)
             .first()
         )
+        is_first_sync = last_msg is None
 
         try:
             messages = provider.get_messages(
@@ -62,9 +89,15 @@ class InboxSyncEngine:
             return
 
         for msg in messages:
-            self._upsert_message(account, msg)
+            # Suppress notifications for the historical backlog pulled on an
+            # account's first sync, but still alert for genuinely recent messages:
+            # a long-quiet account's first real message also has last_msg=None, so
+            # a blanket first-sync mute would silently swallow it. backfill_inbox
+            # seeds explicit history silently (notify=False).
+            notify_new = not is_first_sync or _is_recent(msg.timestamp)
+            self._upsert_message(account, msg, notify=notify_new)
 
-    def _upsert_message(self, account, msg):
+    def _upsert_message(self, account, msg, notify=True):
         """Create or update an inbox message, deduplicating by platform_message_id."""
         obj, created = InboxMessage.objects.update_or_create(
             social_account=account,
@@ -83,7 +116,8 @@ class InboxSyncEngine:
         if created:
             obj.sentiment = analyze_sentiment(obj.body)
             obj.save(update_fields=["sentiment"])
-            self._notify_new_message(obj)
+            if notify:
+                self._notify_new_message(obj)
 
     def _notify_new_message(self, message):
         """Send notification for a new inbox message."""
@@ -149,3 +183,19 @@ class InboxSyncEngine:
                     "workspace_id": str(message.workspace_id),
                 },
             )
+
+
+# How often the recurring inbox-sync cycle runs; registered on a repeating
+# schedule by apps.inbox.apps.InboxConfig. Polling is the always-on baseline
+# documented in architecture.md (webhooks, where configured, supplement it).
+INBOX_SYNC_INTERVAL_SECONDS = 5 * 60  # every 5 minutes
+
+
+@background(schedule=0)
+def run_inbox_sync_cycle():
+    """Run one inbox cycle on the shared ``process_tasks`` worker (every deploy target).
+
+    Delegates to ``InboxSyncEngine.run_cycle`` — the same entry point the
+    ``run_inbox_sync`` management command uses — so the two never diverge.
+    """
+    InboxSyncEngine().run_cycle()

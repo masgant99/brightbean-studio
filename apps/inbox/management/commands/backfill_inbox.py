@@ -60,7 +60,9 @@ class Command(BaseCommand):
                 )
                 count = 0
                 for msg in messages:
-                    engine._upsert_message(account, msg)
+                    # Backfill is explicit history seeding — never notify (the
+                    # periodic sync alerts for genuinely new messages instead).
+                    engine._upsert_message(account, msg, notify=False)
                     count += 1
                 self.stdout.write(self.style.SUCCESS(f"  {account.platform}/{account.account_name}: {count} messages"))
             except NotImplementedError:
