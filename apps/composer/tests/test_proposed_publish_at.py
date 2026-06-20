@@ -78,6 +78,25 @@ class ProposedPublishAtServiceTests(TestCase):
         self.assertIsNotNone(post.scheduled_at)
         self.assertIsNone(post.proposed_publish_at)
 
+    def test_sync_clears_proposed_on_status_only_committed_child(self):
+        # The composer chip endpoint commits a child to 'scheduled' WITHOUT a
+        # scheduled_at; the status-keyed clear must still drop the proposal.
+        from apps.composer.services import sync_post_scheduled_at
+
+        post = create_post(
+            workspace=self.ws,
+            social_account=self.sa,
+            caption="hi",
+            status="draft",
+            proposed_publish_at=PROPOSED_LOCAL,
+        )
+        pp = post.platform_posts.get()
+        pp.status = "scheduled"
+        pp.save(update_fields=["status"])
+        sync_post_scheduled_at(post)
+        post.refresh_from_db()
+        self.assertIsNone(post.proposed_publish_at)
+
 
 class ProposedPublishAtSaveTests(TestCase):
     """POST /workspace/<id>/composer/compose/save/ proposed-time handling."""
@@ -260,3 +279,26 @@ class ProposedPublishAtSaveTests(TestCase):
         post.refresh_from_db()
         self.assertEqual(post.proposed_publish_at, PROPOSED_LOCAL)
         self.assertTrue(post.platform_posts.filter(status="pending_review").exists())
+
+    def test_chip_transition_to_scheduled_clears_proposed(self):
+        # The per-account chip endpoint bypasses the service layer; it must
+        # still drop the proposal when it commits a child to publishing.
+        post = create_post(
+            workspace=self.ws,
+            social_account=self.sa,
+            caption="body",
+            status="draft",
+            proposed_publish_at=PROPOSED_LOCAL,
+            author=self.user,
+        )
+        pp = post.platform_posts.get()
+        url = reverse(
+            "composer:transition_platform_post",
+            kwargs={"workspace_id": self.ws.id, "post_id": post.id, "platform_post_id": pp.id},
+        )
+        resp = self.client.post(url, data={"target_status": "scheduled"})
+        self.assertEqual(resp.status_code, 200)
+        post.refresh_from_db()
+        self.assertIsNone(post.proposed_publish_at)
+        pp.refresh_from_db()
+        self.assertEqual(pp.status, "scheduled")
