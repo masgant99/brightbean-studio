@@ -97,8 +97,10 @@ def org_approval_queue(request):
 
         raise PermissionDenied("Insufficient role.")
 
-    # Get all workspaces the user's org owns
-    workspaces = Workspace.objects.filter(organization=org, is_archived=False)
+    # Get all workspaces the user's org owns. select_related the org so the
+    # per-group {% timezone group.workspace.effective_timezone %} in the
+    # template doesn't lazily re-fetch it once per workspace.
+    workspaces = Workspace.objects.filter(organization=org, is_archived=False).select_related("organization")
 
     workspace_posts = []
     for ws in workspaces:

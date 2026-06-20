@@ -3,6 +3,7 @@ Approvals tab partial for the Publish page.
 Shows pending approval platform posts with filter sub-tabs. Loaded via HTMX into #tab-content.
 All members can view; action buttons shown conditionally based on can_approve permission.
 {% endcomment %}
+{% load tz %}
 
 <div x-data="{ selectedPosts: [], showBulkBar: false }"
      x-effect="showBulkBar = selectedPosts.length > 0"
@@ -96,7 +97,9 @@ All members can view; action buttons shown conditionally based on can_approve pe
                         </span>
                         <span class="text-xs text-stone-500">{{ pp.social_account.account_name|default:pp.social_account.account_handle }}</span>
                         {% if pp.post.scheduled_at %}
-                        <span class="text-xs text-stone-400 tabular-nums">{{ pp.post.scheduled_at|date:"M d, Y H:i" }}</span>
+                        <span class="text-xs text-stone-400 tabular-nums">{% timezone display_timezone %}{{ pp.post.scheduled_at|date:"M d, Y H:i" }}{% endtimezone %}</span>
+                        {% elif pp.post.proposed_publish_at %}
+                        <span class="text-xs text-orange-500 tabular-nums" title="Proposed publishing time">Proposed {% timezone display_timezone %}{{ pp.post.proposed_publish_at|date:"M d, Y H:i" }}{% endtimezone %}</span>
                         {% endif %}
                     </div>
                     <a href="{% url 'composer:compose_edit' workspace_id=workspace.id post_id=pp.post_id %}?account={{ pp.social_account_id }}"

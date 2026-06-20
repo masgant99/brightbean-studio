@@ -383,3 +383,73 @@ class TestMcpAnalyticsPermissionGate:
         body = mcp.json()
         assert "error" in body, body
         assert "permission denied" in body["error"]["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# proposed_publish_at — create_draft carries it; every post payload returns it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestProposedPublishAtMcp:
+    _WHEN = "2027-09-01T09:00:00Z"
+
+    def _call(self, client, name, arguments):
+        resp = client.post(
+            MCP_URL,
+            data=json.dumps(_rpc("tools/call", {"name": name, "arguments": arguments})),
+            content_type="application/json",
+        )
+        assert resp.status_code == 200, resp.content
+        envelope = resp.json()
+        assert "error" not in envelope, envelope
+        return json.loads(envelope["result"]["content"][0]["text"])
+
+    def test_create_draft_with_proposed_round_trips_through_get_post(self, client_with_token, social_account):
+        created = self._call(
+            client_with_token,
+            "create_draft",
+            {
+                "social_account_id": str(social_account.id),
+                "caption": "hi",
+                "proposed_publish_at": self._WHEN,
+            },
+        )
+        assert created["proposed_publish_at"] == self._WHEN
+        fetched = self._call(client_with_token, "get_post", {"post_id": created["id"]})
+        assert fetched["proposed_publish_at"] == self._WHEN
+
+    def test_create_draft_without_proposed_is_null(self, client_with_token, social_account):
+        created = self._call(
+            client_with_token,
+            "create_draft",
+            {"social_account_id": str(social_account.id), "caption": "hi"},
+        )
+        assert created["proposed_publish_at"] is None
+
+    def test_schedule_draft_clears_proposed(self, client_with_token, social_account):
+        created = self._call(
+            client_with_token,
+            "create_draft",
+            {"social_account_id": str(social_account.id), "caption": "hi", "proposed_publish_at": self._WHEN},
+        )
+        assert created["proposed_publish_at"] == self._WHEN
+        when = (timezone.now() + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+        scheduled = self._call(client_with_token, "schedule_draft", {"post_id": created["id"], "scheduled_at": when})
+        assert scheduled["scheduled_at"] is not None
+        assert scheduled["proposed_publish_at"] is None
+        fetched = self._call(client_with_token, "get_post", {"post_id": created["id"]})
+        assert fetched["proposed_publish_at"] is None
+
+    def test_create_draft_naive_proposed_stored_as_utc(self, client_with_token, social_account):
+        created = self._call(
+            client_with_token,
+            "create_draft",
+            {
+                "social_account_id": str(social_account.id),
+                "caption": "hi",
+                "proposed_publish_at": "2027-09-01T09:00:00",
+            },
+        )
+        # A tz-less value is interpreted as UTC and serialized with a Z suffix.
+        assert created["proposed_publish_at"] == "2027-09-01T09:00:00Z"

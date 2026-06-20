@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load tz %}
 {% block title %}All Pending Approvals{% endblock %}
 
 {% block content %}
@@ -35,7 +36,9 @@
                     {% endfor %}
 
                     {% if post.scheduled_at %}
-                    <span class="text-[0.6875rem] text-stone-400 ml-auto">{{ post.scheduled_at|date:"M j, g:i A" }}</span>
+                    <span class="text-[0.6875rem] text-stone-400 ml-auto">{% timezone group.workspace.effective_timezone|default:"UTC" %}{{ post.scheduled_at|date:"M j, g:i A" }}{% endtimezone %}</span>
+                    {% elif post.proposed_publish_at %}
+                    <span class="text-[0.6875rem] text-orange-500 ml-auto" title="Proposed publishing time">Proposed {% timezone group.workspace.effective_timezone|default:"UTC" %}{{ post.proposed_publish_at|date:"M j, g:i A" }}{% endtimezone %}</span>
                     {% endif %}
                 </div>
                 <p class="text-sm text-stone-700 leading-relaxed line-clamp-2">{{ post.caption_snippet }}</p>

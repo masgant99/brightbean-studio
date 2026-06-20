@@ -369,6 +369,11 @@ def compose(request, workspace_id, post_id=None):
     if account_filter and not _is_valid_uuid(account_filter):
         account_filter = ""
 
+    # True when the Schedule Post panel is pre-filled from a draft's *proposed*
+    # time rather than a committed schedule — the composer uses this to keep the
+    # primary action as "Save Draft" instead of arming "schedule for real".
+    schedule_prefill_is_proposed = False
+
     # Load existing post or prepare a blank one
     if post_id:
         post = get_object_or_404(Post, id=post_id, workspace=workspace)
@@ -379,13 +384,17 @@ def compose(request, workspace_id, post_id=None):
         if post.author != request.user and not perms.get("edit_others_posts", False):
             raise PermissionDenied("You do not have permission to edit this post.")
         form = PostForm(instance=post)
-        if post.scheduled_at:
+        # Prefer a committed schedule; fall back to a draft-stage proposal so
+        # the Schedule Post panel shows whichever time the post carries.
+        prefill_dt = post.scheduled_at or post.proposed_publish_at
+        if prefill_dt:
             import zoneinfo
 
             tz = zoneinfo.ZoneInfo(workspace.effective_timezone or "UTC")
-            local_dt = post.scheduled_at.astimezone(tz)
+            local_dt = prefill_dt.astimezone(tz)
             form.initial["scheduled_date"] = local_dt.strftime("%Y-%m-%d")
             form.initial["scheduled_time"] = local_dt.strftime("%H:%M")
+            schedule_prefill_is_proposed = post.scheduled_at is None
         # One fetch serves selected ids, extras, and the status checks below.
         platform_post_list = list(post.platform_posts.select_related("social_account"))
         if account_filter:
@@ -487,6 +496,15 @@ def compose(request, workspace_id, post_id=None):
     workflow_mode = workspace.approval_workflow_mode
     show_submit_button = workflow_mode != "none"
     show_resubmit_button = any(pp.status in ("changes_requested", "rejected") for pp in platform_post_list)
+    # Once the post is committed to publishing, the Schedule Post panel re-times
+    # a live schedule; while still a draft it captures a *proposed* time on save.
+    # Mirror _capture_proposed_publish_at's guard exactly (scheduled_at OR a
+    # committed child) so the hint, the JS schedule-arming, and the save path
+    # never disagree.
+    post_is_scheduled = post is not None and (
+        post.scheduled_at is not None
+        or any(pp.status in ("scheduled", "publishing", "published") for pp in platform_post_list)
+    )
 
     # Approval history and comments for existing posts
     approval_history = []
@@ -570,6 +588,8 @@ def compose(request, workspace_id, post_id=None):
         "can_approve": can_approve,
         "can_view_internal_notes": can_view_internal_notes,
         "is_edit": post is not None,
+        "schedule_prefill_is_proposed": schedule_prefill_is_proposed,
+        "post_is_scheduled": post_is_scheduled,
         "categories": categories,
         "queues": queues,
         "template_data_json": json.dumps(template_data) if template_data else "null",
@@ -634,6 +654,54 @@ def _platform_status_map(post):
     return {str(pp.id): pp.status for pp in post.platform_posts.all()}
 
 
+def _combine_schedule_dt(workspace, sched_date, sched_time):
+    """Combine the composer's date + time inputs into a workspace-tz-aware datetime.
+
+    Returns ``None`` unless both parts are present. Shared by the real
+    schedule (``action='schedule'``) and the draft-stage proposed time so both
+    interpret the same Schedule Post panel inputs identically.
+    """
+    if not (sched_date and sched_time):
+        return None
+    import zoneinfo
+
+    tz = zoneinfo.ZoneInfo(workspace.effective_timezone or "UTC")
+    return datetime.combine(sched_date, sched_time).replace(tzinfo=tz)
+
+
+def _capture_proposed_publish_at(post, post_id, workspace, form, *, clear_when_blank=True):
+    """Set ``post.proposed_publish_at`` from the composer's Schedule Post panel.
+
+    Used by the draft-stage save actions (save draft, submit/resubmit for
+    approval) so a proposed time entered in the panel is persisted and shown in
+    the drafts/approval lists. Mutates ``post`` in place; the caller persists it.
+
+    A no-op once the post is committed to publishing — ``post.scheduled_at`` is
+    set or any child is scheduled/publishing/published — because then the
+    date/time inputs reflect the live schedule (pre-filled from ``scheduled_at``)
+    and must not be reinterpreted as a proposal.
+
+    ``clear_when_blank`` (default True, for Save Draft where the panel *is* the
+    proposed-time editor) clears the proposal when the panel is empty. The
+    approval submit/resubmit actions pass False so routing a draft through
+    approval with an untouched/absent panel can't silently wipe a proposal an
+    agent set via the REST/MCP API.
+    """
+    already_scheduled = post.scheduled_at is not None or (
+        bool(post_id) and post.platform_posts.filter(status__in=["scheduled", "publishing", "published"]).exists()
+    )
+    if already_scheduled:
+        return
+    proposed = _combine_schedule_dt(
+        workspace,
+        form.cleaned_data.get("scheduled_date"),
+        form.cleaned_data.get("scheduled_time"),
+    )
+    if proposed is None and not clear_when_blank:
+        return
+    post.proposed_publish_at = proposed
+
+
 @login_required
 @require_permission("create_posts")
 @require_POST
@@ -668,21 +736,20 @@ def save_post(request, workspace_id, post_id=None):
     initial_status = "draft"  # default status for newly created PlatformPosts
 
     if action == "schedule":
-        sched_date = form.cleaned_data.get("scheduled_date")
-        sched_time = form.cleaned_data.get("scheduled_time")
-        if sched_date and sched_time:
-            ws_tz = workspace.effective_timezone or "UTC"
-            import zoneinfo
-
-            tz = zoneinfo.ZoneInfo(ws_tz)
-            naive_dt = datetime.combine(sched_date, sched_time)
-            aware_dt = naive_dt.replace(tzinfo=tz)
+        aware_dt = _combine_schedule_dt(
+            workspace,
+            form.cleaned_data.get("scheduled_date"),
+            form.cleaned_data.get("scheduled_time"),
+        )
+        if aware_dt:
             if aware_dt <= timezone.now():
                 return JsonResponse(
                     {"errors": {"schedule": "Scheduled time must be in the future."}},
                     status=400,
                 )
             post.scheduled_at = aware_dt
+            # A committed schedule supersedes any draft-stage proposal.
+            post.proposed_publish_at = None
             # Propagate the manually chosen time to every PlatformPost so all
             # selected platforms publish at the same moment.
             post._schedule_propagate_dt = aware_dt  # handled after post.save()
@@ -698,6 +765,7 @@ def save_post(request, workspace_id, post_id=None):
             raise PermissionDenied("You do not have permission to publish directly.")
         now_dt = timezone.now()
         post.scheduled_at = now_dt
+        post.proposed_publish_at = None
         post._schedule_propagate_dt = now_dt  # handled after post.save()
         pending_target = "scheduled"
         initial_status = "scheduled"
@@ -708,6 +776,8 @@ def save_post(request, workspace_id, post_id=None):
         queues = _resolve_queues_for_post(queue_id, workspace, request.POST)
         if not queues:
             return JsonResponse({"errors": {"queue": "No active queue found for the selected channel."}}, status=400)
+        # Queueing assigns real per-platform slots below — drop any proposal.
+        post.proposed_publish_at = None
         post.save()
         # Ensure PlatformPost rows exist for every selected account before the
         # queue service writes per-platform scheduled_at values.
@@ -738,6 +808,8 @@ def save_post(request, workspace_id, post_id=None):
         queues = _resolve_queues_for_post(queue_id, workspace, request.POST)
         if not queues:
             return JsonResponse({"errors": {"queue": "No active queue found for the selected channel."}}, status=400)
+        # Queueing assigns real per-platform slots below — drop any proposal.
+        post.proposed_publish_at = None
         post.save()
         _sync_platform_posts(request, post, workspace, initial_status="draft")
         for q in queues:
@@ -755,6 +827,7 @@ def save_post(request, workspace_id, post_id=None):
         return redirect("composer:compose_edit", workspace_id=workspace.id, post_id=post.id)
     elif action == "submit_for_approval":
         # Save post first so it has a PK, then delegate to approval service
+        _capture_proposed_publish_at(post, post_id, workspace, form, clear_when_blank=False)
         post.save()
         # Sync platform posts before submitting
         _sync_platform_posts(request, post, workspace, initial_status="draft")
@@ -773,6 +846,7 @@ def save_post(request, workspace_id, post_id=None):
         return redirect("composer:compose_edit", workspace_id=workspace.id, post_id=post.id)
     elif action == "resubmit_for_approval":
         # Resubmit after changes requested or rejection
+        _capture_proposed_publish_at(post, post_id, workspace, form, clear_when_blank=False)
         post.save()
         _sync_platform_posts(request, post, workspace, initial_status="draft")
         _save_version(post, request.user)
@@ -788,8 +862,12 @@ def save_post(request, workspace_id, post_id=None):
                 },
             )
         return redirect("composer:compose_edit", workspace_id=workspace.id, post_id=post.id)
-    # else: save_draft — leave children as-is for existing posts; new children
-    # default to draft via initial_status above.
+    elif action == "save_draft":
+        # The Schedule Post panel doubles as the proposed-time picker for a
+        # draft; capture it (or clear it when blank) before the save below.
+        _capture_proposed_publish_at(post, post_id, workspace, form)
+    # Fall through (save_draft / unknown action): persist below; existing
+    # children are left as-is, new children default to draft via initial_status.
 
     post.save()
 
@@ -927,6 +1005,13 @@ def transition_platform_post(request, workspace_id, post_id, platform_post_id):
     except ValueError as exc:
         return JsonResponse({"error": str(exc)}, status=400)
     pp.save(update_fields=["status", "published_at", "updated_at"])
+    # This view mutates a single child directly (no service call), so reconcile
+    # the parent the same way the service-layer transition does: keep
+    # Post.scheduled_at in sync and drop any now-obsolete proposed_publish_at
+    # when this transition commits the post to publishing.
+    from apps.composer.services import sync_post_scheduled_at
+
+    sync_post_scheduled_at(pp.post)
     return JsonResponse({"ok": True, "status": pp.status, "platform_post_id": str(pp.id)})
 
 

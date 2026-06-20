@@ -2,6 +2,7 @@
 Drafts tab partial for the Publish page.
 Shows all draft platform posts in a table. Loaded via HTMX into #tab-content.
 {% endcomment %}
+{% load tz %}
 
 <div x-data{% if is_htmx %} class="tab-slide-in"{% endif %}>
     {% if platform_posts %}
@@ -67,6 +68,9 @@ Shows all draft platform posts in a table. Loaded via HTMX into #tab-content.
                 </td>
                 <td class="px-4 py-3 text-xs text-stone-500 tabular-nums whitespace-nowrap">
                     {{ pp.post.updated_at|timesince }} ago
+                    {% if pp.post.proposed_publish_at %}
+                    <span class="block text-[0.6875rem] text-orange-500" title="Proposed publishing time">Proposed Publishing {% timezone display_timezone %}{{ pp.post.proposed_publish_at|date:"M j, g:i A" }}{% endtimezone %}</span>
+                    {% endif %}
                 </td>
                 <td class="px-4 py-3 text-right" @click.stop>
                     {% include "calendar/partials/_post_actions_menu.html" with post_id=pp.post_id account_id=pp.social_account_id %}

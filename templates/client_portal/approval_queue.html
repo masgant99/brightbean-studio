@@ -1,4 +1,5 @@
 {% extends "client_portal/portal_base.html" %}
+{% load tz %}
 {% block title %}Approve Posts - {{ workspace.name }}{% endblock %}
 
 {% block content %}
@@ -29,7 +30,11 @@
                     {% endfor %}
                     {% if post.scheduled_at %}
                     <span class="text-[0.6875rem] ml-auto" style="color: var(--text-tertiary);">
-                        Scheduled for {{ post.scheduled_at|date:"M j, Y \a\t g:i A" }}
+                        Scheduled for {% timezone workspace.effective_timezone|default:"UTC" %}{{ post.scheduled_at|date:"M j, Y \a\t g:i A" }}{% endtimezone %}
+                    </span>
+                    {% elif post.proposed_publish_at %}
+                    <span class="text-[0.6875rem] ml-auto" style="color: var(--text-tertiary);">
+                        Proposed for {% timezone workspace.effective_timezone|default:"UTC" %}{{ post.proposed_publish_at|date:"M j, Y \a\t g:i A" }}{% endtimezone %}
                     </span>
                     {% endif %}
                 </div>

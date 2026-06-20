@@ -258,6 +258,12 @@ class Post(models.Model):
     scheduled_at = models.DateTimeField(blank=True, null=True, db_index=True)
     published_at = models.DateTimeField(blank=True, null=True)
 
+    # Optional draft-stage suggestion of when to publish — distinct from the
+    # committed ``scheduled_at``. Lets a planner/agent record "this should go
+    # out Tue 9am" without queuing it for the publisher. Cleared once the post
+    # is actually scheduled.
+    proposed_publish_at = models.DateTimeField(blank=True, null=True)
+
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

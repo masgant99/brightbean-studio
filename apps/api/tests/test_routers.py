@@ -599,3 +599,105 @@ class TestFailedAuthThrottle:
         r = c.get("/api/v1/me/")
         assert r.status_code == 401
         assert call_count["n"] == _AUTH_FAIL_LIMIT, "verify_token was called past the throttle threshold"
+
+
+# ---------------------------------------------------------------------------
+# proposed_publish_at — optional draft-stage suggestion on /posts
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestProposedPublishAt:
+    _WHEN = "2027-09-01T09:00:00Z"
+
+    def _create_draft(self, client, social_account, **extra):
+        payload = {
+            "social_account_id": str(social_account.id),
+            "caption": "hi",
+            "action": "draft",
+            **extra,
+        }
+        return client.post("/api/v1/posts/", data=json.dumps(payload), content_type="application/json")
+
+    def test_create_draft_echoes_and_persists_proposed(self, client_with_token, social_account):
+        r = self._create_draft(client_with_token, social_account, proposed_publish_at=self._WHEN)
+        assert r.status_code == 201, r.content
+        body = r.json()
+        assert body["proposed_publish_at"] == self._WHEN
+        assert Post.objects.get(id=body["id"]).proposed_publish_at is not None
+
+    def test_create_draft_defaults_proposed_to_null(self, client_with_token, social_account):
+        body = self._create_draft(client_with_token, social_account).json()
+        assert body["proposed_publish_at"] is None
+
+    def test_schedule_action_ignores_proposed(self, client_with_token, social_account):
+        when = (timezone.now() + timedelta(hours=3)).isoformat()
+        r = client_with_token.post(
+            "/api/v1/posts/",
+            data=json.dumps(
+                {
+                    "social_account_id": str(social_account.id),
+                    "caption": "hi",
+                    "action": "schedule",
+                    "scheduled_at": when,
+                    "proposed_publish_at": self._WHEN,
+                }
+            ),
+            content_type="application/json",
+        )
+        assert r.status_code == 201, r.content
+        # A scheduled post carries a real time, not a proposal.
+        assert r.json()["proposed_publish_at"] is None
+
+    def test_retrieve_returns_proposed(self, client_with_token, social_account):
+        pid = self._create_draft(client_with_token, social_account, proposed_publish_at=self._WHEN).json()["id"]
+        body = client_with_token.get(f"/api/v1/posts/{pid}").json()
+        assert body["proposed_publish_at"] == self._WHEN
+
+    def test_patch_sets_proposed(self, client_with_token, social_account):
+        pid = self._create_draft(client_with_token, social_account).json()["id"]
+        r = client_with_token.patch(
+            f"/api/v1/posts/{pid}",
+            data=json.dumps({"proposed_publish_at": self._WHEN}),
+            content_type="application/json",
+        )
+        assert r.status_code == 200, r.content
+        assert r.json()["proposed_publish_at"] == self._WHEN
+
+    def test_schedule_route_clears_proposed(self, client_with_token, social_account):
+        pid = self._create_draft(client_with_token, social_account, proposed_publish_at=self._WHEN).json()["id"]
+        when = (timezone.now() + timedelta(hours=3)).isoformat()
+        r = client_with_token.post(
+            f"/api/v1/posts/{pid}/schedule",
+            data=json.dumps({"scheduled_at": when}),
+            content_type="application/json",
+        )
+        assert r.status_code == 200, r.content
+        body = r.json()
+        assert body["scheduled_at"] is not None
+        # A committed schedule supersedes the proposal — they never coexist.
+        assert body["proposed_publish_at"] is None
+
+    def test_patch_proposed_on_scheduled_post_is_dropped(self, client_with_token, social_account):
+        when = (timezone.now() + timedelta(hours=3)).isoformat()
+        pid = client_with_token.post(
+            "/api/v1/posts/",
+            data=json.dumps(
+                {
+                    "social_account_id": str(social_account.id),
+                    "caption": "hi",
+                    "action": "schedule",
+                    "scheduled_at": when,
+                }
+            ),
+            content_type="application/json",
+        ).json()["id"]
+        r = client_with_token.patch(
+            f"/api/v1/posts/{pid}",
+            data=json.dumps({"proposed_publish_at": self._WHEN}),
+            content_type="application/json",
+        )
+        assert r.status_code == 200, r.content
+        body = r.json()
+        assert body["scheduled_at"] is not None
+        assert body["proposed_publish_at"] is None

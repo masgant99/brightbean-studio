@@ -613,7 +613,7 @@ The MCP server lives at `POST {APP_URL}/api/v1/mcp` and speaks JSON-RPC 2.0 over
 | Tool | Purpose | Permission |
 |---|---|---|
 | `list_accounts` | List social accounts this API key can act on | — |
-| `create_draft` | Create a draft post (caption, title, media, first comment) | `create_posts` |
+| `create_draft` | Create a draft post (caption, title, media, first comment, optional proposed publish time) | `create_posts` |
 | `schedule_post` | Create and schedule a post in one step | `create_posts` + `publish_directly` |
 | `schedule_draft` | Schedule an existing draft | `create_posts` + `publish_directly` |
 | `get_post` | Retrieve a post with aggregate status and per-platform state | — |

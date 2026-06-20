@@ -31,17 +31,36 @@ def sync_post_scheduled_at(post):
       ``Post.scheduled_at`` lingered at the old value and the post
       kept appearing as scheduled in the UI.
     * No children, parent already null → no-op.
+
+    A post committed to publishing also drops any draft-stage
+    ``proposed_publish_at``. This is the single chokepoint every scheduling
+    path flows through — ``create_post``, ``transition_platform_post`` (the
+    service used by the REST ``/schedule`` route and the MCP ``schedule_draft``
+    tool), the composer's per-account chip endpoint, and the PATCH re-time —
+    so the suggestion and a committed schedule never coexist. The clear is
+    keyed on child *status*, not ``scheduled_at``, so a status-only transition
+    (the chip menu sets ``scheduled`` without a ``scheduled_at``) still drops
+    it; this mirrors ``_capture_proposed_publish_at``'s guard.
     """
     times = list(post.platform_posts.exclude(scheduled_at__isnull=True).values_list("scheduled_at", flat=True))
+    update_fields = []
     if not times:
         if post.scheduled_at is not None:
             post.scheduled_at = None
-            post.save(update_fields=["scheduled_at", "updated_at"])
-        return
-    earliest = min(times)
-    if post.scheduled_at != earliest:
-        post.scheduled_at = earliest
-        post.save(update_fields=["scheduled_at", "updated_at"])
+            update_fields.append("scheduled_at")
+    else:
+        earliest = min(times)
+        if post.scheduled_at != earliest:
+            post.scheduled_at = earliest
+            update_fields.append("scheduled_at")
+    if (
+        post.proposed_publish_at is not None
+        and post.platform_posts.filter(status__in=["scheduled", "publishing", "published"]).exists()
+    ):
+        post.proposed_publish_at = None
+        update_fields.append("proposed_publish_at")
+    if update_fields:
+        post.save(update_fields=[*update_fields, "updated_at"])
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +80,7 @@ def create_post(
     title: str = "",
     first_comment: str = "",
     scheduled_at: dt.datetime | None = None,
+    proposed_publish_at: dt.datetime | None = None,
     author=None,
     status: str = "draft",
     platform_overrides: dict[Any, dict[str, str | None]] | None = None,
@@ -82,6 +102,9 @@ def create_post(
       ``scheduled_at`` is accepted and will fire on the very next tick,
       but the caller almost certainly meant "now-ish" so we leave the
       decision to them.
+    * ``proposed_publish_at`` is an optional draft-stage suggestion. It is
+      stored as-is regardless of ``status`` and carries no future-time
+      requirement — it never reaches the publisher.
     * ``social_account.workspace_id`` must equal ``workspace.id``. The
       caller (auth class / view) already enforced scope, but we
       double-check here so anyone reaching the service directly can't
@@ -158,6 +181,10 @@ def create_post(
             caption=caption,
             first_comment=first_comment,
             scheduled_at=scheduled_at if status == "scheduled" else None,
+            # A proposal is plain draft metadata — keep it independent of
+            # ``status`` (unlike ``scheduled_at``, which only exists once the
+            # post is committed to the publisher).
+            proposed_publish_at=proposed_publish_at,
         )
         # Each override field is independent: ``None`` (or omitted)
         # means "no platform-specific override; fall back to the post

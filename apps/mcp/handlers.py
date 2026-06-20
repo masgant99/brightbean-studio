@@ -15,7 +15,7 @@ type, and agents can always ``JSON.parse`` it.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -139,9 +139,15 @@ def _parse_iso_datetime(value: Any, field_name: str) -> datetime:
         raise JsonRpcError(INVALID_PARAMS, f"{field_name} must be a string")
     try:
         # ``fromisoformat`` accepts trailing 'Z' starting in Python 3.11.
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (TypeError, ValueError) as exc:
         raise JsonRpcError(INVALID_PARAMS, f"{field_name} must be ISO 8601") from exc
+    # Interpret a tz-less value as UTC (the documented contract) so it lands on
+    # the USE_TZ model as an aware instant — otherwise Django stores it naive
+    # (RuntimeWarning) and the workspace-tz list views re-localize it wrongly.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +192,9 @@ def _create_draft(args: dict, context: dict[str, Any]) -> dict:
     if "caption" not in args:
         raise JsonRpcError(INVALID_PARAMS, "caption is required")
     sa = _resolve_allowed_account(api_key, args["social_account_id"])
+    proposed_publish_at = None
+    if args.get("proposed_publish_at") is not None:
+        proposed_publish_at = _parse_iso_datetime(args["proposed_publish_at"], "proposed_publish_at")
     try:
         post = create_post(
             workspace=api_key.workspace,
@@ -194,6 +203,7 @@ def _create_draft(args: dict, context: dict[str, Any]) -> dict:
             title=args.get("title", ""),
             first_comment=args.get("first_comment", ""),
             media_asset_ids=args.get("media_asset_ids") or [],
+            proposed_publish_at=proposed_publish_at,
             author=api_key.issued_by if api_key.issued_by_id else None,
             status="draft",
         )
@@ -207,7 +217,8 @@ register_tool(
         name="create_draft",
         description=(
             "Create a draft post against a connected account. The draft is saved but not "
-            "queued for publishing; call schedule_post or the schedule tool later to publish."
+            "queued for publishing; call schedule_post or the schedule tool later to publish. "
+            "Optionally record a non-binding proposed_publish_at suggestion."
         ),
         input_schema={
             "type": "object",
@@ -229,6 +240,14 @@ register_tool(
                     "items": {"type": "string", "format": "uuid"},
                     "default": [],
                     "description": "MediaAsset UUIDs already uploaded to the workspace's media library.",
+                },
+                "proposed_publish_at": {
+                    "type": "string",
+                    "description": (
+                        "Optional ISO-8601 UTC suggested publish time (e.g. 2026-06-01T14:00:00Z). "
+                        "A non-binding draft hint shown in the drafts/approval views — stored as-is, "
+                        "not validated against the future, and never queued for publishing."
+                    ),
                 },
             },
             "required": ["social_account_id", "caption"],

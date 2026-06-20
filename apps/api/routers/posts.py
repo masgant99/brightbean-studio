@@ -232,6 +232,9 @@ def create(request, payload: CreatePostRequest):
             title=payload.title,
             first_comment=payload.first_comment,
             scheduled_at=payload.scheduled_at,
+            # A scheduled post carries a real time, not a proposal — ignore any
+            # proposed_publish_at when scheduling so the two never coexist.
+            proposed_publish_at=None if payload.action == "schedule" else payload.proposed_publish_at,
             author=request.user if not request.user.is_anonymous else None,
             status="scheduled" if payload.action == "schedule" else "draft",
             platform_overrides=platform_overrides,
@@ -346,6 +349,12 @@ def update(request, post_id: uuid.UUID, payload: UpdatePostRequest):
             scheduled_children.update(scheduled_at=payload.scheduled_at, updated_at=_tz.now())
             post.scheduled_at = payload.scheduled_at
             update_fields.append("scheduled_at")
+        if payload.proposed_publish_at is not None:
+            # Draft-stage suggestion; null is a no-op, consistent with the
+            # other PATCH fields. Not gated on publish_directly — it never
+            # reaches the publisher.
+            post.proposed_publish_at = payload.proposed_publish_at
+            update_fields.append("proposed_publish_at")
         if payload.media_asset_ids is not None:
             # Replace the attachment set in order. Validated above, so
             # the only remaining failure modes are DB-level — the atomic

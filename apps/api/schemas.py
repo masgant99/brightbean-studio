@@ -189,6 +189,14 @@ class CreatePostRequest(Schema):
         None,
         description="UTC timestamp. Required when ``action='schedule'``.",
     )
+    proposed_publish_at: dt.datetime | None = Field(
+        None,
+        description=(
+            "Optional draft-stage suggested publish time (UTC), independent of "
+            "``scheduled_at``. Stored as-is — not validated against the future and "
+            "never queued for publishing; cleared automatically if the post is scheduled."
+        ),
+    )
     idempotency_key: str | None = Field(
         None,
         max_length=128,
@@ -204,6 +212,10 @@ class UpdatePostRequest(Schema):
     scheduled_at: dt.datetime | None = Field(
         None,
         description="If the post is currently scheduled, this re-times it. Ignored for drafts.",
+    )
+    proposed_publish_at: dt.datetime | None = Field(
+        None,
+        description="Set a draft's suggested publish time (UTC). Sending null is a no-op (cannot clear via PATCH).",
     )
 
 
@@ -252,12 +264,13 @@ class PostResponse(Schema):
     first_comment: str
     scheduled_at: dt.datetime | None
     published_at: dt.datetime | None
+    proposed_publish_at: dt.datetime | None
     status: str  # derived aggregate
     platform_posts: list[PlatformPostSummary]
     created_at: dt.datetime
     updated_at: dt.datetime
 
-    @field_serializer("scheduled_at", "published_at", "created_at", "updated_at")
+    @field_serializer("scheduled_at", "published_at", "proposed_publish_at", "created_at", "updated_at")
     def _serialize_dt(self, value: dt.datetime | None) -> str | None:
         return _serialize_utc_z(value)
 
@@ -280,6 +293,7 @@ class PostResponse(Schema):
             first_comment=post.first_comment,
             scheduled_at=post.scheduled_at,
             published_at=post.published_at,
+            proposed_publish_at=post.proposed_publish_at,
             status=post.status,
             platform_posts=platform_posts,
             created_at=post.created_at,

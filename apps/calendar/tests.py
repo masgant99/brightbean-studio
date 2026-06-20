@@ -386,3 +386,52 @@ class RecurringPostTimezoneTests(TestCase):
         # today_local = 2026-06-17, horizon +3 local days → furthest is 2026-06-20.
         # A UTC-based cutoff (the pre-fix bug) would stop a day short at 06-19.
         self.assertEqual(local_dates[-1], date(2026, 6, 20))
+
+
+class PublishTabTimezoneTests(TestCase):
+    """The publish tabs must render times in a user-supplied ?tz= without 500ing."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(email="tz@example.com", password="pw", tos_accepted_at=timezone.now())
+        self.org = Organization.objects.create(name="Org")
+        self.ws = Workspace.objects.create(organization=self.org, name="WS", timezone="Europe/Berlin")
+        OrgMembership.objects.create(user=self.user, organization=self.org, org_role=OrgMembership.OrgRole.OWNER)
+        WorkspaceMembership.objects.create(
+            user=self.user, workspace=self.ws, workspace_role=WorkspaceMembership.WorkspaceRole.OWNER
+        )
+        self.sa = SocialAccount.objects.create(
+            workspace=self.ws,
+            platform="linkedin_personal",
+            account_platform_id="li-tz",
+            account_name="A",
+            connection_status=SocialAccount.ConnectionStatus.CONNECTED,
+        )
+        self.post = Post.objects.create(
+            workspace=self.ws,
+            author=self.user,
+            caption="x",
+            proposed_publish_at=datetime(2027, 9, 1, 9, 0, tzinfo=zoneinfo.ZoneInfo("Europe/Berlin")),
+        )
+        PlatformPost.objects.create(post=self.post, social_account=self.sa, status="draft")
+        self.client.force_login(self.user)
+
+    def test_coerce_timezone_falls_back_on_bad_input(self):
+        from apps.calendar.views import _coerce_timezone
+
+        self.assertEqual(_coerce_timezone("Europe/Berlin", None), "Europe/Berlin")
+        self.assertEqual(_coerce_timezone("Not/AZone", "Europe/Berlin"), "Europe/Berlin")
+        self.assertEqual(_coerce_timezone("", None), "UTC")
+        self.assertEqual(_coerce_timezone(None, None), "UTC")
+        self.assertEqual(_coerce_timezone("garbage", "also-bad"), "UTC")
+
+    def test_drafts_tab_with_invalid_tz_does_not_500(self):
+        url = reverse("calendar:publish_tab_drafts", kwargs={"workspace_id": self.ws.id})
+        resp = self.client.get(url + "?tz=Not/AReal/Zone")
+        self.assertEqual(resp.status_code, 200)
+        # Falls back to the workspace zone, so the proposed badge still renders.
+        self.assertContains(resp, "Proposed")
+
+    def test_drafts_tab_with_empty_tz_does_not_500(self):
+        url = reverse("calendar:publish_tab_drafts", kwargs={"workspace_id": self.ws.id})
+        resp = self.client.get(url + "?tz=")
+        self.assertEqual(resp.status_code, 200)

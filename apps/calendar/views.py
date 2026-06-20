@@ -273,6 +273,25 @@ _TAB_TEMPLATES = {
 }
 
 
+def _coerce_timezone(*candidates: str | None) -> str:
+    """Return the first candidate that names a real IANA zone, else ``"UTC"``.
+
+    Guards the ``{% timezone %}`` tag against an unknown/empty user-supplied
+    ``?tz=`` value (which would otherwise raise inside template rendering).
+    """
+    import zoneinfo
+
+    for name in candidates:
+        if not name:
+            continue
+        try:
+            zoneinfo.ZoneInfo(name)
+        except (ValueError, zoneinfo.ZoneInfoNotFoundError):
+            continue
+        return name
+    return "UTC"
+
+
 def _get_tab_context(request, workspace, tab: str) -> dict:
     """Build the template context for one publish tab partial.
 
@@ -284,7 +303,11 @@ def _get_tab_context(request, workspace, tab: str) -> dict:
     if tab not in _TAB_TEMPLATES:
         tab = "queue"
 
-    display_tz = request.GET.get("tz", workspace.effective_timezone or "UTC")
+    # ``tz`` is a user-controlled query param fed straight into the templates'
+    # ``{% timezone %}`` tag, which calls ``zoneinfo.ZoneInfo`` and raises
+    # (ZoneInfoNotFoundError / ValueError) on an unknown or empty value — that
+    # would 500 the whole tab. Coerce to the first valid candidate.
+    display_tz = _coerce_timezone(request.GET.get("tz"), workspace.effective_timezone)
     has_connected_accounts = SocialAccount.objects.filter(
         workspace=workspace,
         connection_status=SocialAccount.ConnectionStatus.CONNECTED,

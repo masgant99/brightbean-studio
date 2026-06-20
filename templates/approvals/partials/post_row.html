@@ -1,4 +1,4 @@
-{% load humanize %}
+{% load humanize tz %}
 <div id="post-row-{{ post.id }}" class="bg-white border border-stone-200 rounded-xl p-4 hover:shadow-md transition-all group"
      x-data="{ expanded: false, showActions: false }">
     <div class="flex items-start gap-3">
@@ -34,11 +34,16 @@
                     {% endfor %}
                 </div>
 
-                <!-- Scheduled time -->
+                <!-- Scheduled time, or a draft-stage proposed time -->
                 {% if post.scheduled_at %}
                 <span class="text-[0.6875rem] text-stone-400 ml-auto flex-shrink-0">
                     <svg class="w-3 h-3 inline -mt-0.5 mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                    {{ post.scheduled_at|date:"M j, g:i A" }}
+                    {% timezone workspace.effective_timezone|default:"UTC" %}{{ post.scheduled_at|date:"M j, g:i A" }}{% endtimezone %}
+                </span>
+                {% elif post.proposed_publish_at %}
+                <span class="text-[0.6875rem] text-orange-500 ml-auto flex-shrink-0" title="Proposed publishing time">
+                    <svg class="w-3 h-3 inline -mt-0.5 mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                    Proposed {% timezone workspace.effective_timezone|default:"UTC" %}{{ post.proposed_publish_at|date:"M j, g:i A" }}{% endtimezone %}
                 </span>
                 {% endif %}
             </div>
