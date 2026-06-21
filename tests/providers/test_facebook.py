@@ -100,9 +100,7 @@ def test_publish_single_photo_uses_photos_edge_without_staging():
     """A single image must publish directly via /photos (no unpublished staging, no attached_media)."""
     provider = FacebookProvider({"client_id": "id", "client_secret": "secret"})
     provider._request = MagicMock(
-        return_value=MagicMock(
-            json=MagicMock(return_value={"id": "photo-1", "post_id": "page-1_post-1"})
-        )
+        return_value=MagicMock(json=MagicMock(return_value={"id": "photo-1", "post_id": "page-1_post-1"}))
     )
 
     result = provider.publish_post(
@@ -218,6 +216,4 @@ def test_publish_multi_photo_cleans_up_after_partial_staging_failure():
             ),
         )
 
-    provider._request.assert_any_call(
-        "DELETE", "https://graph.facebook.com/v21.0/photo-1", access_token="page-token"
-    )
+    provider._request.assert_any_call("DELETE", "https://graph.facebook.com/v21.0/photo-1", access_token="page-token")

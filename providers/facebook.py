@@ -299,8 +299,7 @@ class FacebookProvider(SocialProvider):
         # orphaned unpublished photos behind for an obviously invalid request.
         if len(urls) > FACEBOOK_MAX_ATTACHED_MEDIA:
             raise PublishError(
-                f"Facebook multi-photo posts support at most {FACEBOOK_MAX_ATTACHED_MEDIA} photos "
-                f"(got {len(urls)})",
+                f"Facebook multi-photo posts support at most {FACEBOOK_MAX_ATTACHED_MEDIA} photos (got {len(urls)})",
                 platform=self.platform_name,
             )
         if any(self._is_video_url(url) for url in urls):
