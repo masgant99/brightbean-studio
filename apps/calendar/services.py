@@ -3,7 +3,6 @@
 import zoneinfo
 from datetime import datetime, time, timedelta
 
-from django.db import models
 from django.utils import timezone
 
 from .models import PostingSlot, Queue, QueueEntry
@@ -85,6 +84,212 @@ def _next_slot_datetimes(social_account, after_dt, count=30):
     return results
 
 
+# ---------------------------------------------------------------------------
+# Stable slot-occupancy model
+#
+# A queue's "slots" are the upcoming PostingSlot datetimes for its channel; each
+# is either OCCUPIED (a non-published post on the channel already holds that
+# instant) or a GAP. Operations are LOCAL — they fill or vacate a single slot
+# and never recompute unrelated entries — so an entry's time stays stable until
+# that entry is explicitly moved. Occupancy is keyed off PlatformPost.scheduled_at
+# (the publisher's source of truth), not the queue rows, so a manually-scheduled
+# post or a recurrence clone on the same channel also reserves its instant — no
+# double-booking. PROTECTED_STATUSES (published/publishing) are history and never
+# occupy a future candidate or get moved.
+# ---------------------------------------------------------------------------
+
+
+class QueueFullError(Exception):
+    """No open posting slot exists within the scheduling lookahead horizon."""
+
+
+def _occupied_datetimes(social_account, *, exclude_pp_ids=()):
+    """Future slot instants already claimed on this channel.
+
+    Non-published/-publishing PlatformPosts with a future ``scheduled_at`` on
+    ``social_account``. ``exclude_pp_ids`` drops a post's own row so it never
+    blocks itself while being re-slotted.
+    """
+    from apps.composer.models import PlatformPost
+
+    qs = (
+        PlatformPost.objects.filter(
+            social_account=social_account,
+            scheduled_at__isnull=False,
+            scheduled_at__gt=timezone.now(),
+        )
+        .exclude(status__in=PlatformPost.PROTECTED_STATUSES)
+        .exclude(id__in=list(exclude_pp_ids))
+    )
+    return set(qs.values_list("scheduled_at", flat=True))
+
+
+def _next_available_slot(social_account, *, exclude_pp_ids=(), after=None):
+    """First upcoming PostingSlot datetime not already occupied, or ``None``.
+
+    ``None`` means every slot within the lookahead horizon (``_next_slot_datetimes``
+    caps at 60 days) is taken — the queue is full.
+    """
+    after = after or timezone.now()
+    occupied = _occupied_datetimes(social_account, exclude_pp_ids=exclude_pp_ids)
+    # Among the first ``len(occupied) + 1`` distinct slots at most ``len(occupied)``
+    # can be taken, so one is guaranteed free if any free slot exists at all.
+    candidates = _next_slot_datetimes(social_account, after, count=len(occupied) + 1)
+    for slot_dt in candidates:
+        if slot_dt not in occupied:
+            return slot_dt
+    return None
+
+
+def _platform_post_for(post, social_account):
+    """The post's PlatformPost child on this channel (or ``None``)."""
+    return post.platform_posts.filter(social_account=social_account).first()
+
+
+def _is_protected(pp):
+    from apps.composer.models import PlatformPost
+
+    return pp is not None and pp.status in PlatformPost.PROTECTED_STATUSES
+
+
+def _ensure_entry(post, queue):
+    """Return the post's QueueEntry, creating it (appended) if absent."""
+    from django.db.models import Max
+
+    entry = queue.entries.filter(post=post).first()
+    if entry is None:
+        max_pos = queue.entries.aggregate(m=Max("position"))["m"]
+        entry = QueueEntry.objects.create(queue=queue, post=post, position=(max_pos or 0) + 1)
+    return entry
+
+
+def _write_slot(entry, pp, slot_dt):
+    """Persist one slot assignment to the QueueEntry and its PlatformPost."""
+    from apps.composer.services import sync_post_scheduled_at
+
+    entry.assigned_slot_datetime = slot_dt
+    entry.save(update_fields=["assigned_slot_datetime"])
+    if pp is not None:
+        pp.scheduled_at = slot_dt
+        pp.save(update_fields=["scheduled_at", "updated_at"])
+        sync_post_scheduled_at(pp.post)
+
+
+def add_post_next_available(post, queue):
+    """Place ``post`` into this queue's first open slot (upsert-aware).
+
+    Comment §1 (Create · Next Available) and §4 (Edit · Next Available): if the
+    post is already queued, its own slot is vacated first and it is re-slotted to
+    the next gap; existing entries are never disturbed. Raises ``QueueFullError`` when
+    no slot is free within the horizon.
+    """
+    from django.db import transaction
+
+    with transaction.atomic():
+        # Lock the queue's rows so two concurrent adds can't grab one slot.
+        list(queue.entries.select_for_update().values_list("id", flat=True))
+
+        pp = _platform_post_for(post, queue.social_account)
+        exclude = [pp.id] if pp is not None else []
+        slot_dt = _next_available_slot(queue.social_account, exclude_pp_ids=exclude)
+        if slot_dt is None:
+            raise QueueFullError(f"Queue {queue.id} has no open slot within the scheduling horizon.")
+
+        entry = _ensure_entry(post, queue)
+        _write_slot(entry, pp, slot_dt)
+        return entry
+
+
+def prioritize(post, queue):
+    """Place ``post`` at the queue's earliest slot, laddering others up by one.
+
+    Comment §2: if the earliest upcoming slot is free, ``post`` takes it and
+    nothing moves. Otherwise every other occupied queue entry shifts one slot
+    later (``[k]→[k+1]``, preserving the gap pattern) before ``post`` takes
+    slot ``[0]``. Upsert-aware. Raises ``QueueFullError`` past the horizon.
+    """
+    from django.db import transaction
+
+    with transaction.atomic():
+        list(queue.entries.select_for_update().values_list("id", flat=True))
+
+        now = timezone.now()
+        pp = _platform_post_for(post, queue.social_account)
+
+        # This queue's movable entries (exclude `post`, exclude protected), each
+        # currently sitting on a future slot.
+        movable = []
+        for e in queue.entries.exclude(post=post).select_related("post").filter(assigned_slot_datetime__gt=now):
+            p = _platform_post_for(e.post, queue.social_account)
+            if _is_protected(p):
+                continue
+            movable.append((e, p))
+        movable_dts = {e.assigned_slot_datetime for e, _ in movable}
+
+        candidates = _next_slot_datetimes(queue.social_account, now, count=len(movable) + 2)
+        if not candidates:
+            raise QueueFullError(f"Queue {queue.id} has no posting slots within the horizon.")
+
+        entry = _ensure_entry(post, queue)
+        target = candidates[0]
+
+        # Slot 0 is free among the queue's own entries.
+        if target not in movable_dts:
+            # If a foreign/fixed post (manual schedule, clone, other queue) holds
+            # slot 0, we cannot preempt it — degrade to the next genuine gap.
+            occupied = _occupied_datetimes(queue.social_account, exclude_pp_ids=[pp.id] if pp else [])
+            if target in occupied:
+                free = _next_available_slot(queue.social_account, exclude_pp_ids=[pp.id] if pp else [])
+                if free is None:
+                    raise QueueFullError(f"Queue {queue.id} has no open slot within the scheduling horizon.")
+                _write_slot(entry, pp, free)
+                return entry
+            _write_slot(entry, pp, target)
+            return entry
+
+        # Slot 0 taken by a queue entry: ladder every movable entry up one index.
+        index_of = {dt: i for i, dt in enumerate(candidates)}
+        movers = [
+            (index_of[e.assigned_slot_datetime], e, p) for e, p in movable if e.assigned_slot_datetime in index_of
+        ]
+        max_i = max((i for i, _, _ in movers), default=0)
+        if max_i + 1 >= len(candidates):
+            candidates = _next_slot_datetimes(queue.social_account, now, count=max_i + 2)
+        # Descending so each destination slot is vacated before it is written.
+        for i, e, p in sorted(movers, key=lambda t: t[0], reverse=True):
+            _write_slot(e, p, candidates[i + 1])
+        _write_slot(entry, pp, candidates[0])
+        return entry
+
+
+def remove_from_queue(entry):
+    """Remove a single entry, leaving a gap; neighbours are untouched.
+
+    Comment §3: delete the QueueEntry and clear the matching PlatformPost's
+    schedule. The child is transitioned ``scheduled→draft`` (which nulls
+    ``scheduled_at``) rather than nulled directly, so it can't become instantly
+    due via the publisher's ``Coalesce(scheduled_at, post__scheduled_at)``
+    fallback while the parent aggregate still points at a past time.
+    """
+    from django.db import transaction
+
+    from apps.composer.services import sync_post_scheduled_at, transition_platform_post
+
+    with transaction.atomic():
+        post = entry.post
+        queue = entry.queue
+        pp = _platform_post_for(post, queue.social_account)
+        if pp is not None and pp.status == "scheduled" and pp.can_transition_to("draft"):
+            transition_platform_post(pp, "draft")
+        entry.delete()
+        sync_post_scheduled_at(post)
+
+
+def reslot_to_next_available(entry):
+    """Free this entry's slot and move it to the queue's next gap."""
+    return add_post_next_available(entry.post, entry.queue)
+
+
 def assign_queue_slots(queue):
     """Recalculate assigned_slot_datetime for all entries in a queue.
 
@@ -139,37 +344,53 @@ def assign_queue_slots(queue):
 
 
 def add_to_queue(post, queue, priority=False):
-    """Add a post to a queue and recalculate slot assignments.
+    """Add a post to a queue (back-compat dispatcher).
 
-    If *priority* is True the post is inserted at position 0 (top of the
-    queue) and all existing entries are shifted down.  Otherwise it is
-    appended at the end.
+    Routes to the stable-slot ops: ``prioritize`` (top of queue) or
+    ``add_post_next_available`` (first open gap). Kept so existing callers and
+    the composer's ``add_to_queue`` / ``add_to_queue_priority`` actions only
+    need their resolved service swapped, not their wiring.
     """
-    from django.db.models import Max
-
     if priority:
-        # Shift all existing entries down by 1
-        queue.entries.update(position=models.F("position") + 1)
-        position = 0
-    else:
-        max_pos = queue.entries.aggregate(max_pos=Max("position"))["max_pos"]
-        position = (max_pos or 0) + 1
-
-    QueueEntry.objects.update_or_create(
-        queue=queue,
-        post=post,
-        defaults={"position": position},
-    )
-
-    assign_queue_slots(queue)
+        return prioritize(post, queue)
+    return add_post_next_available(post, queue)
 
 
 def reorder_queue(queue, ordered_entry_ids):
-    """Reorder queue entries by a list of entry IDs and recalculate slots."""
-    for idx, entry_id in enumerate(ordered_entry_ids):
-        QueueEntry.objects.filter(id=entry_id, queue=queue).update(position=idx)
+    """Reassign the queue's occupied slot times to entries in a new order.
 
-    assign_queue_slots(queue)
+    Drag-reorder under the slot model: the SET of occupied datetimes is
+    preserved (gaps stay put); only which post sits in which slot changes. The
+    movable, slotted entries named in ``ordered_entry_ids`` are matched — in that
+    visual order — to their datetimes sorted ascending. Protected
+    (published/publishing) entries are immovable and skipped.
+    """
+    from django.db import transaction
+
+    with transaction.atomic():
+        list(queue.entries.select_for_update().values_list("id", flat=True))
+
+        ordered = []
+        for eid in ordered_entry_ids:
+            e = queue.entries.filter(id=eid).select_related("post").first()
+            if e is None:
+                continue
+            p = _platform_post_for(e.post, queue.social_account)
+            if _is_protected(p):
+                continue
+            ordered.append((e, p))
+
+        # Redistribute only the datetimes already held, among the entries that
+        # hold one — never invent or drop a slot during a reorder.
+        slotted = [(e, p) for e, p in ordered if e.assigned_slot_datetime is not None]
+        slots = sorted(e.assigned_slot_datetime for e, _ in slotted)
+        for idx, (e, p) in enumerate(slotted):
+            _write_slot(e, p, slots[idx])
+
+        # Keep ``position`` as a stable visual tie-break in the dragged order.
+        for idx, (e, _p) in enumerate(ordered):
+            if e.position != idx:
+                QueueEntry.objects.filter(id=e.id).update(position=idx)
 
 
 def repair_future_published_scheduled_at(*, workspace_id=None, apply=True):

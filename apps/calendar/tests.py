@@ -12,10 +12,15 @@ from django.utils import timezone
 from apps.accounts.models import User
 from apps.calendar.models import PostingSlot, Queue, QueueEntry, RecurrenceRule
 from apps.calendar.services import (
+    QueueFullError,
     _next_slot_datetimes,
+    add_post_next_available,
     add_to_queue,
+    prioritize,
+    remove_from_queue,
     reorder_queue,
     repair_future_published_scheduled_at,
+    reslot_to_next_available,
 )
 from apps.calendar.tasks import generate_recurring_posts
 from apps.calendar.views import _day_view_data
@@ -814,3 +819,157 @@ class PublishTabTimezoneTests(TestCase):
         url = reverse("calendar:publish_tab_drafts", kwargs={"workspace_id": self.ws.id})
         resp = self.client.get(url + "?tz=")
         self.assertEqual(resp.status_code, 200)
+
+
+class SlotOccupancyQueueTests(TestCase):
+    """Stable slot-occupancy: local ops fill/vacate one slot and preserve gaps."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Slot Org", default_timezone="UTC")
+        self.workspace = Workspace.objects.create(organization=self.org, name="Slot WS")
+        self.account = SocialAccount.objects.create(
+            workspace=self.workspace,
+            platform="linkedin_personal",
+            account_platform_id="li-slot",
+            account_name="Slot",
+            connection_status=SocialAccount.ConnectionStatus.CONNECTED,
+        )
+        # One slot every weekday at 09:00 → deterministic, dense candidate list.
+        for day in range(7):
+            PostingSlot.objects.create(social_account=self.account, day_of_week=day, time=time(9, 0))
+        self.queue = Queue.objects.create(workspace=self.workspace, name="Slot Q", social_account=self.account)
+
+    def _cands(self, n=6):
+        return _next_slot_datetimes(self.account, timezone.now(), count=n)
+
+    def _occupy(self, slot_dt, *, queued=True, caption="occupied"):
+        post = Post.objects.create(workspace=self.workspace, caption=caption)
+        pp = PlatformPost.objects.create(
+            post=post,
+            social_account=self.account,
+            status=PlatformPost.Status.SCHEDULED,
+            scheduled_at=slot_dt,
+        )
+        entry = None
+        if queued:
+            entry = QueueEntry.objects.create(queue=self.queue, post=post, position=0, assigned_slot_datetime=slot_dt)
+        return post, pp, entry
+
+    def _add(self, caption="new"):
+        post = Post.objects.create(workspace=self.workspace, caption=caption)
+        PlatformPost.objects.create(post=post, social_account=self.account, status=PlatformPost.Status.DRAFT)
+        return post
+
+    def test_next_available_fills_first_gap(self):
+        c = self._cands()
+        self._occupy(c[0])  # [0] taken
+        self._occupy(c[2])  # [2] taken, [1] is the gap
+        post = self._add()
+
+        add_post_next_available(post, self.queue)
+
+        pp = PlatformPost.objects.get(post=post, social_account=self.account)
+        self.assertEqual(pp.scheduled_at, c[1])
+
+    def test_next_available_leaves_occupied_entries_unchanged(self):
+        c = self._cands()
+        _, pp0, _ = self._occupy(c[0])
+        _, pp2, _ = self._occupy(c[2])
+
+        add_post_next_available(self._add(), self.queue)
+
+        pp0.refresh_from_db()
+        pp2.refresh_from_db()
+        self.assertEqual(pp0.scheduled_at, c[0])
+        self.assertEqual(pp2.scheduled_at, c[2])
+
+    def test_prioritize_with_slot0_taken_ladders_and_preserves_gap(self):
+        c = self._cands()
+        _, pp_a, _ = self._occupy(c[0], caption="A")
+        _, pp_b, _ = self._occupy(c[2], caption="B")  # gap at [1]
+        post = self._add()
+
+        prioritize(post, self.queue)
+
+        pp_new = PlatformPost.objects.get(post=post, social_account=self.account)
+        pp_a.refresh_from_db()
+        pp_b.refresh_from_db()
+        self.assertEqual(pp_new.scheduled_at, c[0])  # new at the top
+        self.assertEqual(pp_a.scheduled_at, c[1])  # old[0] → [1]
+        self.assertEqual(pp_b.scheduled_at, c[3])  # old[2] → [3] (gap now at [2])
+
+    def test_prioritize_with_slot0_free_moves_nothing(self):
+        c = self._cands()
+        _, pp_a, _ = self._occupy(c[1], caption="A")  # [0] free
+        post = self._add()
+
+        prioritize(post, self.queue)
+
+        pp_new = PlatformPost.objects.get(post=post, social_account=self.account)
+        pp_a.refresh_from_db()
+        self.assertEqual(pp_new.scheduled_at, c[0])
+        self.assertEqual(pp_a.scheduled_at, c[1])  # untouched
+
+    def test_remove_leaves_gap_drafts_child_and_not_due(self):
+        c = self._cands()
+        post_a, pp_a, entry_a = self._occupy(c[0], caption="A")
+        _, pp_b, _ = self._occupy(c[1], caption="B")
+
+        remove_from_queue(entry_a)
+
+        self.assertFalse(QueueEntry.objects.filter(id=entry_a.id).exists())
+        pp_a.refresh_from_db()
+        post_a.refresh_from_db()
+        self.assertEqual(pp_a.status, PlatformPost.Status.DRAFT)
+        self.assertIsNone(pp_a.scheduled_at)
+        self.assertIsNone(post_a.scheduled_at)
+        pp_b.refresh_from_db()
+        self.assertEqual(pp_b.scheduled_at, c[1])  # neighbour untouched
+
+        # Drafted child is not swept up by the publisher's due query.
+        from django.db.models.functions import Coalesce
+
+        due = set(
+            PlatformPost.objects.filter(status=PlatformPost.Status.SCHEDULED)
+            .annotate(eff=Coalesce("scheduled_at", "post__scheduled_at"))
+            .filter(eff__lte=timezone.now())
+            .values_list("id", flat=True)
+        )
+        self.assertNotIn(pp_a.id, due)
+
+    def test_reslot_moves_entry_to_first_gap(self):
+        c = self._cands()
+        post_a, pp_a, entry_a = self._occupy(c[2], caption="A")  # [0],[1] free
+
+        reslot_to_next_available(entry_a)
+
+        pp_a.refresh_from_db()
+        self.assertEqual(pp_a.scheduled_at, c[0])  # excludes itself → first gap
+        # Still a single entry (upsert, not duplicated).
+        self.assertEqual(QueueEntry.objects.filter(post=post_a, queue=self.queue).count(), 1)
+
+    def test_add_next_available_upserts_existing_entry(self):
+        c = self._cands()
+        post_a, pp_a, _ = self._occupy(c[2], caption="A")
+        self._occupy(c[0], caption="B")  # [0] taken, [1] free
+
+        add_post_next_available(post_a, self.queue)  # post_a already queued
+
+        pp_a.refresh_from_db()
+        self.assertEqual(pp_a.scheduled_at, c[1])  # moved to first gap, excluding self
+        self.assertEqual(QueueEntry.objects.filter(post=post_a, queue=self.queue).count(), 1)
+
+    def test_queue_full_raises_when_channel_has_no_slots(self):
+        slotless = SocialAccount.objects.create(
+            workspace=self.workspace,
+            platform="bluesky",
+            account_platform_id="bs-slotless",
+            account_name="Slotless",
+            connection_status=SocialAccount.ConnectionStatus.CONNECTED,
+        )
+        queue = Queue.objects.create(workspace=self.workspace, name="Empty Q", social_account=slotless)
+        post = Post.objects.create(workspace=self.workspace, caption="x")
+        PlatformPost.objects.create(post=post, social_account=slotless, status=PlatformPost.Status.DRAFT)
+
+        with self.assertRaises(QueueFullError):
+            add_post_next_available(post, queue)
