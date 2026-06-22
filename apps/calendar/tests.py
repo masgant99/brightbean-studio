@@ -825,6 +825,15 @@ class SlotOccupancyQueueTests(TestCase):
     """Stable slot-occupancy: local ops fill/vacate one slot and preserve gaps."""
 
     def setUp(self):
+        # Freeze now so the candidate list the tests compute via _cands() can't
+        # drift from the list the service computes microseconds later (crossing a
+        # 09:00 slot boundary would otherwise shift the window by one).
+        self._now_patcher = patch(
+            "django.utils.timezone.now",
+            return_value=datetime(2026, 7, 1, 12, 0, tzinfo=zoneinfo.ZoneInfo("UTC")),
+        )
+        self._now_patcher.start()
+        self.addCleanup(self._now_patcher.stop)
         self.org = Organization.objects.create(name="Slot Org", default_timezone="UTC")
         self.workspace = Workspace.objects.create(organization=self.org, name="Slot WS")
         self.account = SocialAccount.objects.create(
@@ -1035,6 +1044,71 @@ class SlotOccupancyQueueTests(TestCase):
 
         with self.assertRaises(QueueFullError):
             prioritize(newp, queue)
+
+    def test_prioritize_keys_on_scheduled_at_not_stale_assigned(self):
+        # A queued post dragged on the calendar (reschedule_post) moves
+        # pp.scheduled_at but leaves QueueEntry.assigned_slot_datetime stale.
+        # prioritize must read the real (scheduled_at) slot, not the stale one.
+        c = self._cands()
+        post_a, pp_a, _ = self._occupy(c[0], caption="A")  # entry assigned=c[0]
+        pp_a.scheduled_at = c[2]  # "dragged" to c[2]; assigned stays c[0]
+        pp_a.save(update_fields=["scheduled_at"])
+
+        prioritize(self._add(caption="B"), self.queue)
+
+        pp_b = PlatformPost.objects.get(post__caption="B", social_account=self.account)
+        pp_a.refresh_from_db()
+        # Slot 0 is really free (A is at c[2]); B takes it and A is untouched —
+        # no mis-ladder off the stale assigned_slot_datetime.
+        self.assertEqual(pp_b.scheduled_at, c[0])
+        self.assertEqual(pp_a.scheduled_at, c[2])
+
+    def test_reorder_keys_on_scheduled_at_not_stale_assigned(self):
+        c = self._cands()
+        post1, pp1, e1 = self._occupy(c[0], caption="one")
+        post2, pp2, e2 = self._occupy(c[1], caption="two")
+        pp1.scheduled_at = c[2]  # drag post1 to c[2]; e1.assigned stays c[0]
+        pp1.save(update_fields=["scheduled_at"])
+
+        reorder_queue(self.queue, [str(e1.id), str(e2.id)])
+
+        pp1.refresh_from_db()
+        pp2.refresh_from_db()
+        # Real occupied instants are {c[1], c[2]} (not the stale {c[0], c[1]});
+        # redistributed in order → e1=c[1], e2=c[2]. No double-book.
+        self.assertEqual(pp1.scheduled_at, c[1])
+        self.assertEqual(pp2.scheduled_at, c[2])
+        self.assertEqual(len({pp1.scheduled_at, pp2.scheduled_at}), 2)
+
+    def test_reslot_is_noop_for_publishing_post(self):
+        # A protected (publishing) post's schedule is history — reslot must not
+        # overwrite it with a future slot (the corruption class repair exists for).
+        c = self._cands()
+        post = Post.objects.create(workspace=self.workspace, caption="pub")
+        pp = PlatformPost.objects.create(
+            post=post, social_account=self.account, status=PlatformPost.Status.PUBLISHING, scheduled_at=c[2]
+        )
+        entry = QueueEntry.objects.create(queue=self.queue, post=post, position=0, assigned_slot_datetime=c[2])
+
+        reslot_to_next_available(entry)
+
+        pp.refresh_from_db()
+        self.assertEqual(pp.scheduled_at, c[2])  # untouched
+
+    def test_remove_clears_schedule_for_failed_child(self):
+        c = self._cands()
+        post = Post.objects.create(workspace=self.workspace, caption="failed")
+        pp = PlatformPost.objects.create(
+            post=post, social_account=self.account, status=PlatformPost.Status.FAILED, scheduled_at=c[0]
+        )
+        entry = QueueEntry.objects.create(queue=self.queue, post=post, position=0, assigned_slot_datetime=c[0])
+
+        remove_from_queue(entry)
+
+        self.assertFalse(QueueEntry.objects.filter(id=entry.id).exists())
+        pp.refresh_from_db()
+        self.assertEqual(pp.status, PlatformPost.Status.DRAFT)
+        self.assertIsNone(pp.scheduled_at)  # no longer lingers on the calendar
 
 
 class QueueEntryEndpointTests(TestCase):

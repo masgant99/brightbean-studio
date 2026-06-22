@@ -318,7 +318,7 @@ def clone_post(post, *, author=None):
                         platform_specific_title=pp.platform_specific_title,
                         platform_specific_caption=pp.platform_specific_caption,
                         platform_specific_first_comment=pp.platform_specific_first_comment,
-                        platform_specific_media=pp.platform_specific_media,
+                        platform_specific_media=copy.deepcopy(pp.platform_specific_media),
                         platform_extra=copy.deepcopy(pp.platform_extra) if pp.platform_extra else {},
                     )
                     for pp in children
@@ -333,7 +333,7 @@ def clone_post(post, *, author=None):
                         media_asset=pm.media_asset,
                         position=pm.position,
                         alt_text=pm.alt_text,
-                        platform_overrides=pm.platform_overrides,
+                        platform_overrides=copy.deepcopy(pm.platform_overrides),
                     )
                     for pm in media
                 ]

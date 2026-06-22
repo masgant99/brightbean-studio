@@ -994,6 +994,12 @@ def reschedule_post(request, workspace_id):
         if pp.status == "draft" and pp.can_transition_to("scheduled"):
             pp.transition_to("scheduled")
         pp.save(update_fields=["status", "scheduled_at", "updated_at"])
+        # Keep any queue entry's slot mirror in step with the manual reschedule
+        # so the queue list shows the real time (the slot ops read scheduled_at,
+        # but the detail page still orders by assigned_slot_datetime).
+        QueueEntry.objects.filter(post=post, queue__social_account=pp.social_account).update(
+            assigned_slot_datetime=new_dt
+        )
         sync_post_scheduled_at(post)
     except (ValueError, TypeError) as e:
         return JsonResponse({"error": f"Invalid datetime: {e}"}, status=400)

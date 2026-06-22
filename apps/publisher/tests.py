@@ -313,3 +313,22 @@ class PublishedPostLeavesQueueTest(TestCase):
         self.assertIsNotNone(self.pp.published_at)
         # The QueueEntry is gone (slot freed), but the PlatformPost remains.
         self.assertFalse(QueueEntry.objects.filter(id=self.entry.id).exists())
+
+    def test_publish_success_survives_queue_cleanup_failure(self):
+        from apps.composer.models import PlatformPost
+
+        engine = PublishEngine()
+        success = {"success": True, "platform_post_id": "x", "status_code": 200, "response": {}}
+        # The post is durably published; if the QueueEntry cleanup then fails it
+        # must NOT fall through to a retry (which would re-dispatch and double-post).
+        with (
+            patch.object(PublishEngine, "_dispatch_to_provider", return_value=success),
+            patch("apps.calendar.models.QueueEntry.objects") as mock_objects,
+        ):
+            mock_objects.filter.side_effect = Exception("db unavailable")
+            engine._publish_platform_post(self.pp)
+
+        self.pp.refresh_from_db()
+        self.assertEqual(self.pp.status, PlatformPost.Status.PUBLISHED)
+        self.assertEqual(self.pp.retry_count, 0)
+        self.assertIsNone(self.pp.next_retry_at)
