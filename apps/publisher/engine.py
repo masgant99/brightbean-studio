@@ -216,6 +216,18 @@ class PublishEngine:
                 platform_post.published_at = timezone.now()
                 platform_post.save()
 
+                # A published post leaves the queue: drop the QueueEntry that
+                # held this channel's slot so the queue shows only upcoming
+                # posts and the slot frees up as a gap. Structurally prevents a
+                # published row from ever being re-slotted (the lingering-entry
+                # bug class). The PlatformPost + published_at are kept.
+                from apps.calendar.models import QueueEntry
+
+                QueueEntry.objects.filter(
+                    post_id=platform_post.post_id,
+                    queue__social_account_id=platform_post.social_account_id,
+                ).delete()
+
                 # Log success
                 PublishLog.objects.create(
                     platform_post=platform_post,
