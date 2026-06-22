@@ -27,27 +27,13 @@ def check_social_account_health(account_id: str):
         logger.warning("Health check: account %s not found, skipping", account_id)
         return
 
-    # Load app credentials (.env dominant, admin-entered org creds as fallback).
-    from apps.credentials.models import PlatformCredential, resolve_platform_credentials
+    # Resolve per-account credentials via the shared resolver: org/.env app creds
+    # plus per-account federation metadata (Mastodon instance_url behind an SSRF
+    # check, Bluesky pds_url, Instagram ig_user_id). Shared with the publish engine
+    # and inbox sync so every get_provider call resolves credentials identically.
+    from apps.publisher.engine import _resolve_publish_credentials
 
-    credentials = resolve_platform_credentials(account.platform, account.workspace.organization_id)
-
-    # For Mastodon, inject instance-specific client credentials
-    if account.platform == PlatformCredential.Platform.MASTODON and account.instance_url:
-        from .models import MastodonAppRegistration
-
-        try:
-            reg = MastodonAppRegistration.objects.get(instance_url=account.instance_url)
-            credentials = {
-                **credentials,
-                "instance_url": account.instance_url,
-                "client_id": reg.client_id,
-                "client_secret": reg.client_secret,
-            }
-        except MastodonAppRegistration.DoesNotExist:
-            pass
-    elif account.platform == PlatformCredential.Platform.INSTAGRAM:
-        credentials = {**credentials, "ig_user_id": account.account_platform_id}
+    credentials = _resolve_publish_credentials(account)
 
     try:
         provider = get_provider(account.platform, credentials)

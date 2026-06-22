@@ -88,6 +88,33 @@ class TestCheckSocialAccountHealth:
         assert credentials["ig_user_id"] == "17841400000000000"
         mock_provider.get_profile.assert_called_once_with("page-token")
 
+    @patch("apps.common.validators.is_safe_url", return_value=True)
+    @patch("providers.get_provider")
+    def test_mastodon_health_check_injects_instance_url_without_registration(
+        self, mock_get_provider, _mock_is_safe_url, workspace
+    ):
+        # Regression: the old inline resolver set instance_url only *inside* the
+        # MastodonAppRegistration lookup, so an account with no registration row had
+        # instance_url dropped -> empty base URL. The shared resolver sets it first.
+        # is_safe_url is patched to keep the SSRF check off the network.
+        account = SocialAccount.objects.create(
+            workspace=workspace,
+            platform="mastodon",
+            account_platform_id="masto-1",
+            account_name="Masto",
+            instance_url="https://mastodon.social",
+            oauth_access_token="tok",
+            connection_status=SocialAccount.ConnectionStatus.CONNECTED,
+        )
+        mock_provider = MagicMock()
+        mock_provider.get_profile.return_value = _profile(platform_id="masto-1", name="Masto")
+        mock_get_provider.return_value = mock_provider
+
+        check_social_account_health.now(str(account.id))
+
+        _platform, credentials = mock_get_provider.call_args.args
+        assert credentials["instance_url"] == "https://mastodon.social"
+
     @patch("providers.get_provider")
     def test_failed_health_check_sets_error(self, mock_get_provider, connected_account):
         mock_provider = MagicMock()
