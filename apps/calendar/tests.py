@@ -441,6 +441,27 @@ class RepairPublishedScheduledAtTests(TestCase):
             scheduled_at=self.next_week,
         )
 
+        # The bug also stamped the same future slot onto the QueueEntry; the
+        # queue UI reads assigned_slot_datetime, so the repair must reset it too.
+        self.queue = Queue.objects.create(
+            workspace=self.workspace,
+            name="Repair Queue",
+            social_account=self.account,
+        )
+        self.corrupt_entry = QueueEntry.objects.create(
+            queue=self.queue,
+            post=self.corrupt_post,
+            position=0,
+            assigned_slot_datetime=self.next_week,
+        )
+        # A correctly-scheduled queue entry (past slot) must be left alone.
+        self.healthy_entry = QueueEntry.objects.create(
+            queue=self.queue,
+            post=self.healthy_post,
+            position=1,
+            assigned_slot_datetime=self.last_week - timedelta(minutes=5),
+        )
+
     def test_dry_run_reports_but_writes_nothing(self):
         result = repair_future_published_scheduled_at(apply=False)
 
@@ -487,6 +508,85 @@ class RepairPublishedScheduledAtTests(TestCase):
         call_command("repair_published_scheduled_at")
         self.corrupt_pp.refresh_from_db()
         self.assertEqual(self.corrupt_pp.scheduled_at, self.last_week)
+
+    def test_repair_resets_stale_queue_entry_slot(self):
+        result = repair_future_published_scheduled_at(apply=True)
+        self.assertEqual(result["queue_entry_count"], 1)
+
+        # The corrupt entry's queue slot snaps back to the real publish time so
+        # queue_detail no longer renders the published post in the future.
+        self.corrupt_entry.refresh_from_db()
+        self.assertEqual(self.corrupt_entry.assigned_slot_datetime, self.last_week)
+        # A correctly-scheduled queue entry is untouched.
+        self.healthy_entry.refresh_from_db()
+        self.assertEqual(self.healthy_entry.assigned_slot_datetime, self.last_week - timedelta(minutes=5))
+
+    def test_dry_run_counts_stale_queue_entry_without_writing(self):
+        result = repair_future_published_scheduled_at(apply=False)
+        self.assertEqual(result["queue_entry_count"], 1)
+        self.corrupt_entry.refresh_from_db()
+        self.assertEqual(self.corrupt_entry.assigned_slot_datetime, self.next_week)
+
+    def test_repair_does_not_make_fallback_scheduled_sibling_due(self):
+        """A still-scheduled sibling that rides the parent fallback must not be
+        dragged into the past (and published early) when the repair lowers the
+        parent aggregate.
+
+        Multi-platform post: one child already published (with its scheduled_at
+        dragged into the future) and a sibling on another account still
+        SCHEDULED with no scheduled_at of its own — the sibling's due time
+        resolves through the publisher's
+        ``Coalesce(scheduled_at, post__scheduled_at)`` fallback. Snapping the
+        published child back to its past published_at drops Post.scheduled_at
+        into the past, which would make the sibling instantly due.
+        """
+        from django.db.models.functions import Coalesce
+
+        sibling_account = SocialAccount.objects.create(
+            workspace=self.workspace,
+            platform="bluesky",
+            account_platform_id="bs-sibling",
+            account_name="Sibling",
+            connection_status=SocialAccount.ConnectionStatus.CONNECTED,
+        )
+        post = Post.objects.create(workspace=self.workspace, caption="multi-platform")
+        published_child = PlatformPost.objects.create(
+            post=post,
+            social_account=self.account,
+            status=PlatformPost.Status.PUBLISHED,
+            published_at=self.last_week,
+            scheduled_at=self.next_week,  # corrupt: dragged into the future
+        )
+        sibling = PlatformPost.objects.create(
+            post=post,
+            social_account=sibling_account,
+            status=PlatformPost.Status.SCHEDULED,
+            scheduled_at=None,  # rides Post.scheduled_at via the Coalesce fallback
+        )
+        # Parent currently resolves to the (future) corrupt time — the state the
+        # queue bug leaves behind (min-of-children with the sibling NULL).
+        post.scheduled_at = self.next_week
+        post.save(update_fields=["scheduled_at"])
+
+        repair_future_published_scheduled_at(apply=True)
+
+        # Published child snapped back to its real publish instant.
+        published_child.refresh_from_db()
+        self.assertEqual(published_child.scheduled_at, self.last_week)
+        # Parent aggregate did move into the past (the trigger condition)...
+        post.refresh_from_db()
+        self.assertEqual(post.scheduled_at, self.last_week)
+        # ...but the sibling was pinned to its prior effective (future) time, so
+        # it is NOT swept up as due by the publisher's Coalesce due-query.
+        sibling.refresh_from_db()
+        self.assertEqual(sibling.scheduled_at, self.next_week)
+        due_ids = set(
+            PlatformPost.objects.filter(status=PlatformPost.Status.SCHEDULED)
+            .annotate(effective_at=Coalesce("scheduled_at", "post__scheduled_at"))
+            .filter(effective_at__lte=timezone.now())
+            .values_list("id", flat=True)
+        )
+        self.assertNotIn(sibling.id, due_ids)
 
 
 class CalendarChannelSlotViewTests(TestCase):

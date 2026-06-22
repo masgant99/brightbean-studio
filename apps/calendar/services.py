@@ -188,9 +188,17 @@ def repair_future_published_scheduled_at(*, workspace_id=None, apply=True):
     ``published_at``. Idempotent and safe to re-run: once reset, a row no longer
     matches the filter.
 
+    The same bad future slot was also written to the matching
+    ``QueueEntry.assigned_slot_datetime`` (the queue the bug walked, where
+    ``queue.social_account == platform_post.social_account``). ``queue_detail``
+    renders that field and the published-status guard stops ``assign_queue_slots``
+    from ever recomputing a published entry, so the repair snaps that stale queue
+    timestamp back to ``published_at`` too (same ``> published_at`` signature).
+
     Returns a summary dict ``{"rows": [...], "platform_post_count": int,
-    "post_count": int, "applied": bool}`` where each row is a plain dict
-    describing one affected ``PlatformPost`` (for dry-run reporting).
+    "post_count": int, "queue_entry_count": int, "applied": bool}`` where each
+    row is a plain dict describing one affected ``PlatformPost`` (for dry-run
+    reporting).
     """
     from django.db.models import F
 
@@ -212,6 +220,7 @@ def repair_future_published_scheduled_at(*, workspace_id=None, apply=True):
 
     rows = []
     post_ids = set()
+    queue_targets = []
     for pp in affected:
         rows.append(
             {
@@ -225,18 +234,63 @@ def repair_future_published_scheduled_at(*, workspace_id=None, apply=True):
             }
         )
         post_ids.add(pp.post_id)
+        queue_targets.append((pp.post_id, pp.social_account_id, pp.published_at))
+
+    # The bug stamped the same future slot onto the matching QueueEntry
+    # (queue.social_account == pp.social_account); queue_detail renders it, and
+    # the published-status guard now keeps assign_queue_slots from ever
+    # recomputing a published entry. Snap those stale timestamps back too — same
+    # ``> published_at`` signature, so a correctly null/past entry is left alone.
+    queue_entry_targets = [
+        (
+            published_at,
+            QueueEntry.objects.filter(
+                post_id=post_id,
+                queue__social_account_id=social_account_id,
+                assigned_slot_datetime__gt=published_at,
+            ),
+        )
+        for post_id, social_account_id, published_at in queue_targets
+    ]
+    queue_entry_count = 0
 
     if apply and rows:
-        # Snap each child back to its real publish instant, then recompute the
-        # parent ``Post.scheduled_at`` aggregate (min-of-children) so listings
-        # and Coalesce fallbacks line up again.
-        affected.update(scheduled_at=F("published_at"))
-        for post in Post.objects.filter(id__in=post_ids):
-            sync_post_scheduled_at(post)
+        from django.db import transaction
+
+        with transaction.atomic():
+            posts = list(Post.objects.filter(id__in=post_ids))
+            # Snapping a published child back to its past ``published_at`` lowers
+            # the parent ``Post.scheduled_at`` aggregate (min-of-children) into
+            # the past. A SCHEDULED sibling with ``scheduled_at=NULL`` resolves
+            # its due time through the publisher's
+            # ``Coalesce(scheduled_at, post__scheduled_at)`` fallback, so a
+            # backward parent move would make that sibling instantly due and
+            # publish it early. Pin such siblings to their current effective time
+            # *before* lowering the parent, so the repair never drags a pending
+            # post's schedule into the past.
+            for post in posts:
+                if post.scheduled_at is not None:
+                    post.platform_posts.filter(
+                        status=PlatformPost.Status.SCHEDULED,
+                        scheduled_at__isnull=True,
+                    ).update(scheduled_at=post.scheduled_at)
+            # Snap each corrupt published child back to its real publish instant,
+            # then recompute the parent aggregate so listings and Coalesce
+            # fallbacks line up again.
+            affected.update(scheduled_at=F("published_at"))
+            for published_at, stale_entries in queue_entry_targets:
+                queue_entry_count += stale_entries.update(assigned_slot_datetime=published_at)
+            for post in posts:
+                sync_post_scheduled_at(post)
+    else:
+        # Dry run: report how many stale QueueEntry rows would be reset.
+        for _published_at, stale_entries in queue_entry_targets:
+            queue_entry_count += stale_entries.count()
 
     return {
         "rows": rows,
         "platform_post_count": len(rows),
         "post_count": len(post_ids),
+        "queue_entry_count": queue_entry_count,
         "applied": bool(apply and rows),
     }

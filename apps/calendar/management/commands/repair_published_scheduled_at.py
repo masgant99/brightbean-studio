@@ -49,7 +49,8 @@ class Command(BaseCommand):
 
         header = "Would repair" if dry_run else "Repaired"
         self.stdout.write(
-            f"{header} {result['platform_post_count']} platform post(s) across {result['post_count']} post(s):"
+            f"{header} {result['platform_post_count']} platform post(s) across {result['post_count']} post(s) "
+            f"(+{result['queue_entry_count']} stale queue slot(s)):"
         )
         for row in rows:
             self.stdout.write(
@@ -65,4 +66,9 @@ class Command(BaseCommand):
         if dry_run:
             self.stdout.write(self.style.WARNING("\nDry run — no changes written. Re-run without --dry-run to apply."))
         else:
-            self.stdout.write(self.style.SUCCESS(f"\nDone. Reset {result['platform_post_count']} platform post(s)."))
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"\nDone. Reset {result['platform_post_count']} platform post(s) "
+                    f"and {result['queue_entry_count']} queue slot(s)."
+                )
+            )
