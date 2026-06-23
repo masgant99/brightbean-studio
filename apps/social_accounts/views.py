@@ -261,15 +261,20 @@ def connect_platform(request, workspace_id):
     nonce = secrets.token_urlsafe(32)
     state = _sign_state(workspace_id, platform, request.user.id, nonce)
 
+    # PKCE verifier (e.g. TikTok); round-trips via the session alongside the nonce.
+    code_verifier = secrets.token_urlsafe(64) if provider.uses_pkce else None
+
     # Store nonce in session to prevent replay
     request.session[OAUTH_SESSION_KEY] = {
         "nonce": nonce,
         "workspace_id": str(workspace_id),
         "platform": platform,
+        "code_verifier": code_verifier,
     }
 
     redirect_uri = _build_redirect_uri(request, platform)
-    auth_url = provider.get_auth_url(redirect_uri, state)
+    auth_kwargs = {"code_verifier": code_verifier} if code_verifier else {}
+    auth_url = provider.get_auth_url(redirect_uri, state, **auth_kwargs)
     return redirect(auth_url)
 
 
@@ -348,7 +353,9 @@ def oauth_callback(request, platform):
 
         provider = _get_provider_for_platform(platform, request.org.id, **extra_creds)
         redirect_uri = redirect_uri_from_request(request)
-        tokens = provider.exchange_code(code, redirect_uri)
+        code_verifier = session_data.get("code_verifier")
+        exchange_kwargs = {"code_verifier": code_verifier} if code_verifier else {}
+        tokens = provider.exchange_code(code, redirect_uri, **exchange_kwargs)
 
         # Facebook/Instagram/LinkedIn Company: connect Pages, not personal profiles
         if platform in (

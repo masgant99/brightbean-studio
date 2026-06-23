@@ -1,7 +1,9 @@
 """Tests for TikTokProvider analytics methods (video.list + user.info.stats)."""
 
+import hashlib
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -21,6 +23,52 @@ def _date_range() -> tuple[datetime, datetime]:
         datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC),
         datetime(2026, 6, 4, 23, 59, 59, tzinfo=UTC),
     )
+
+
+class TestGetAuthUrl:
+    def test_provider_declares_pkce(self):
+        assert TikTokProvider({"client_key": "k", "client_secret": "s"}).uses_pkce is True
+
+    def test_includes_pkce_challenge_when_verifier_given(self):
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        url = provider.get_auth_url("https://app.example/cb", "state-123", code_verifier="verifier-xyz")
+
+        query = parse_qs(urlsplit(url).query)
+        # TikTok quirk: code_challenge is the HEX sha256 digest, not base64url.
+        expected = hashlib.sha256(b"verifier-xyz").hexdigest()
+        assert query["code_challenge"] == [expected]
+        assert len(expected) == 64  # hex digest length — guards against base64url (~43 chars)
+        assert query["code_challenge_method"] == ["S256"]
+
+    def test_omits_pkce_when_no_verifier(self):
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        url = provider.get_auth_url("https://app.example/cb", "state-123")
+
+        assert "code_challenge" not in url
+        assert "code_challenge_method" not in url
+
+
+class TestExchangeCode:
+    @patch.object(TikTokProvider, "_request")
+    def test_sends_code_verifier_when_given(self, mock_request):
+        mock_request.return_value = _make_response({"access_token": "tok", "expires_in": 3600})
+
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        provider.exchange_code("auth-code", "https://app.example/cb", code_verifier="verifier-xyz")
+
+        _, kwargs = mock_request.call_args
+        assert kwargs["data"]["code_verifier"] == "verifier-xyz"
+        assert kwargs["data"]["grant_type"] == "authorization_code"
+
+    @patch.object(TikTokProvider, "_request")
+    def test_omits_code_verifier_when_absent(self, mock_request):
+        mock_request.return_value = _make_response({"access_token": "tok", "expires_in": 3600})
+
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        provider.exchange_code("auth-code", "https://app.example/cb")
+
+        _, kwargs = mock_request.call_args
+        assert "code_verifier" not in kwargs["data"]
 
 
 class TestGetPostMetrics:

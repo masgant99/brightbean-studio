@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import os
 from datetime import datetime
@@ -82,8 +83,23 @@ CONTENT_TYPE_BY_EXT = {
 }
 
 
+def _pkce_code_challenge(code_verifier: str) -> str:
+    """Derive TikTok's PKCE ``code_challenge`` from a ``code_verifier``.
+
+    TikTok deviates from RFC 7636: the challenge is the HEX-encoded SHA256 of
+    the verifier (a 64-char hex string), NOT the base64url encoding that
+    standard PKCE clients use. TikTok only supports the ``S256`` method.
+    See https://developers.tiktok.com/doc/login-kit-desktop/
+    """
+    return hashlib.sha256(code_verifier.encode("ascii")).hexdigest()
+
+
 class TikTokProvider(SocialProvider):
     """TikTok Content Posting API provider using OAuth 2.0."""
+
+    # TikTok requires PKCE on the authorization request (for desktop/native
+    # apps and localhost redirect URIs); see ``_pkce_code_challenge``.
+    uses_pkce = True
 
     # ------------------------------------------------------------------
     # Metadata
@@ -146,7 +162,7 @@ class TikTokProvider(SocialProvider):
     # OAuth
     # ------------------------------------------------------------------
 
-    def get_auth_url(self, redirect_uri: str, state: str) -> str:
+    def get_auth_url(self, redirect_uri: str, state: str, code_verifier: str | None = None) -> str:
         params = {
             "client_key": self.credentials["client_key"],
             "redirect_uri": redirect_uri,
@@ -154,20 +170,22 @@ class TikTokProvider(SocialProvider):
             "scope": ",".join(self.required_scopes),
             "response_type": "code",
         }
+        if code_verifier:
+            params["code_challenge"] = _pkce_code_challenge(code_verifier)
+            params["code_challenge_method"] = "S256"
         return f"{AUTH_URL}?{urlencode(params)}"
 
-    def exchange_code(self, code: str, redirect_uri: str) -> OAuthTokens:
-        resp = self._request(
-            "POST",
-            TOKEN_URL,
-            data={
-                "client_key": self.credentials["client_key"],
-                "client_secret": self.credentials["client_secret"],
-                "code": code,
-                "grant_type": "authorization_code",
-                "redirect_uri": redirect_uri,
-            },
-        )
+    def exchange_code(self, code: str, redirect_uri: str, code_verifier: str | None = None) -> OAuthTokens:
+        data = {
+            "client_key": self.credentials["client_key"],
+            "client_secret": self.credentials["client_secret"],
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": redirect_uri,
+        }
+        if code_verifier:
+            data["code_verifier"] = code_verifier
+        resp = self._request("POST", TOKEN_URL, data=data)
         body = resp.json()
         if "access_token" not in body:
             raise OAuthError(
