@@ -1078,8 +1078,8 @@ def reschedule_post(request, workspace_id):
     )
     post = pp.post
 
-    # Check permissions - only editable statuses can be rescheduled
-    if pp.status not in ("draft", "approved", "scheduled"):
+    # Only draggable statuses can be rescheduled (published/publishing can't).
+    if not pp.is_reschedulable:
         return JsonResponse({"error": "Post cannot be rescheduled in its current status."}, status=400)
 
     # Check RBAC
@@ -1099,9 +1099,11 @@ def reschedule_post(request, workspace_id):
         if new_dt.tzinfo is None:
             new_dt = new_dt.replace(tzinfo=tz)
         pp.scheduled_at = new_dt
-        # Drop into "scheduled" so the publisher picks it up. Drag-drop on a
-        # draft chip is treated as an implicit schedule action.
-        if pp.status == "draft" and pp.can_transition_to("scheduled"):
+        # Dropping a draft or a failed chip onto the calendar is an implicit
+        # (re)schedule / retry: move it into "scheduled" so the publisher picks
+        # it up. Other statuses (approved, scheduled, pending_*) just change
+        # time and keep their editorial status.
+        if pp.status in ("draft", "failed") and pp.can_transition_to("scheduled"):
             pp.transition_to("scheduled")
         pp.save(update_fields=["status", "scheduled_at", "updated_at"])
         # Keep any queue entry's slot mirror in step with the manual reschedule
