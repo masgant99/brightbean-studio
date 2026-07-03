@@ -176,6 +176,10 @@ def _get_filtered_platform_posts(workspace, request):
     qs = (
         PlatformPost.objects.filter(post__workspace_id=workspace.id)
         .select_related("post", "post__author", "post__category", "social_account")
+        # Chips render the post's first media thumbnail; without this each chip
+        # would fire its own media_attachments + media_asset queries (N+1) on
+        # every month/week/day render.
+        .prefetch_related("post__media_attachments__media_asset")
         .annotate(effective_at=Coalesce("scheduled_at", "post__scheduled_at"))
     )
 
