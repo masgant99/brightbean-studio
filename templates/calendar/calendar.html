@@ -299,8 +299,15 @@
         margin-left: auto;
     }
 
-    /* Draggable feedback */
-    .post-chip.dragging { opacity: 0.5; transform: rotate(2deg); }
+    /* Drag-and-drop (SortableJS) feedback */
+    .post-chip.is-draggable { cursor: grab; }
+    .post-chip.is-draggable:active { cursor: grabbing; }
+    /* Placeholder left in the source cell while dragging */
+    .chip-ghost { opacity: 0.4; }
+    /* The element under the cursor while dragging */
+    .chip-chosen { box-shadow: 0 4px 12px rgba(0,0,0,0.18); }
+    /* Highlight a cell as a valid drop target on hover-drag */
+    .cal-drop.sortable-drag-over { outline: 2px dashed #F97316; outline-offset: -2px; }
 
     @keyframes slideUp {
         from { opacity: 0; transform: translateY(8px); }
@@ -351,58 +358,68 @@ function calendarApp() {
             htmx.ajax('GET', url, {target: '#calendar-content', swap: 'innerHTML'});
         },
 
-        startDrag(event, platformPostId) {
-            this.draggedPlatformPostId = platformPostId;
-            event.dataTransfer.effectAllowed = 'move';
-            event.target.classList.add('dragging');
+        init() {
+            // SortableJS drag-and-drop. Wire on first load and re-wire after
+            // every HTMX swap of the calendar grid (nav, view change, filters).
+            this.$nextTick(() => this.initCalendarDnD());
+            document.body.addEventListener('htmx:afterSettle', (e) => {
+                const t = e.detail && e.detail.target;
+                if (t && (t.id === 'calendar-content' || (t.querySelector && t.querySelector('.cal-drop')))) {
+                    this.$nextTick(() => this.initCalendarDnD());
+                }
+            });
+            // A drag on an <a> chip would otherwise fire a trailing click and
+            // navigate to the editor. Swallow that click while a drag is in
+            // flight; genuine clicks (no drag) still open the post.
+            document.body.addEventListener('click', (e) => {
+                if (this._draggingChip && e.target.closest('.post-chip.is-draggable')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+            }, true);
         },
 
-        endDrag(event) {
-            event.target.classList.remove('dragging');
-            this.draggedPlatformPostId = null;
+        initCalendarDnD() {
+            if (typeof Sortable === 'undefined') return;
+            document.querySelectorAll('#calendar-content .cal-drop').forEach((cell) => {
+                if (Sortable.get(cell)) return; // already wired this cell
+                Sortable.create(cell, {
+                    group: 'calendar',
+                    draggable: '.post-chip.is-draggable',
+                    animation: 150,
+                    ghostClass: 'chip-ghost',
+                    chosenClass: 'chip-chosen',
+                    // Use the mouse-based fallback so the browser's native
+                    // anchor-drag (dragging the link URL) never kicks in.
+                    forceFallback: true,
+                    fallbackOnBody: true,
+                    fallbackTolerance: 3,
+                    // Touch: short hold before a drag begins so it doesn't
+                    // hijack a scroll. Desktop mouse is unaffected (immediate).
+                    delay: 150,
+                    delayOnTouchOnly: true,
+                    onStart: () => { this._draggingChip = true; },
+                    onEnd: (evt) => {
+                        setTimeout(() => { this._draggingChip = false; }, 60);
+                        if (evt.to === evt.from) return; // dropped back in place
+                        const ppId = evt.item.getAttribute('data-platform-post-id');
+                        const date = evt.to.getAttribute('data-date');
+                        const time = evt.to.getAttribute('data-time') || '09:00';
+                        if (!ppId || !date) return;
+                        this.rescheduleChip(ppId, date + 'T' + time + ':00');
+                    },
+                });
+            });
         },
 
-        allowDrop(event) {
-            event.preventDefault();
-            event.dataTransfer.dropEffect = 'move';
-        },
-
-        dropOnSlot(event, dateStr, timeStr) {
-            event.preventDefault();
-            const platformPostId = this.draggedPlatformPostId;
-            if (!platformPostId) return;
-
-            const chip = document.querySelector(
-                `[data-platform-post-id="${platformPostId}"]`
-            );
-            const targetCell = event.currentTarget;
-            if (!chip || !targetCell) return;
-
-            const originalParent = chip.parentNode;
-            const originalNextSibling = chip.nextSibling;
-
-            // Optimistically move the chip into the target slot so the user
-            // sees the reschedule immediately, with no full grid reload.
-            if (originalParent !== targetCell || originalNextSibling !== null) {
-                targetCell.appendChild(chip);
-            }
-            this.draggedPlatformPostId = null;
-
-            // dateStr/timeStr are the target cell's workspace-tz wall date/time
-            // (see _cell_compose_params); reschedule_post interprets the naive
-            // value in the workspace timezone, so the drop lands on the right
-            // instant even when the calendar display timezone differs from it.
-            const newDatetime = dateStr + 'T' + timeStr + ':00';
-
+        rescheduleChip(platformPostId, newDatetime) {
+            // newDatetime is the target cell's workspace-tz wall date/time (see
+            // _cell_compose_params); reschedule_post interprets the naive value
+            // in the workspace timezone, so the drop lands on the right instant.
             const csrfToken =
                 (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value ||
                 (document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/) || [])[1] ||
                 '';
-
-            const rollback = () => {
-                originalParent.insertBefore(chip, originalNextSibling);
-            };
-
             fetch('{% url "calendar:reschedule" workspace_id=workspace.id %}', {
                 method: 'POST',
                 headers: {
@@ -415,14 +432,9 @@ function calendarApp() {
                     new_datetime: newDatetime,
                 }),
             }).then((res) => {
-                if (!res.ok) {
-                    rollback();
-                    console.error('Reschedule failed', res.status);
-                }
-            }).catch((err) => {
-                rollback();
-                console.error('Reschedule failed', err);
-            });
+                // On failure snap the grid back to the server truth.
+                if (!res.ok) this.reloadCalendar();
+            }).catch(() => this.reloadCalendar());
         }
     };
 }
