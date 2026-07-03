@@ -339,7 +339,7 @@ function calendarApp() {
         draggedPlatformPostId: null,
         calendarFilters: {
             status: '{{ active_filters.statuses.0|default:"" }}',
-            channel: '',
+            channels: [],
             tag: '{{ active_filters.tags.0|default:"" }}',
             tz: '{{ display_timezone|default:"UTC" }}',
         },
@@ -350,7 +350,7 @@ function calendarApp() {
             params.set('view', this.activeView);
             params.set('date', '{{ target_date|date:"Y-m-d" }}');
             if (this.calendarFilters.status) params.set('status', this.calendarFilters.status);
-            if (this.calendarFilters.channel) params.set('channel', this.calendarFilters.channel);
+            this.calendarFilters.channels.forEach(c => params.append('channel', c));
             if (this.calendarFilters.tag) params.set('tag', this.calendarFilters.tag);
             if (this.calendarFilters.tz) params.set('tz', this.calendarFilters.tz);
             {% if show_holidays %}params.set('holidays', '1');{% endif %}
@@ -442,7 +442,7 @@ function calendarApp() {
 function publishList() {
     return {
         activeTab: '{{ active_tab|default:"queue" }}',
-        activeChannel: '',
+        selectedChannels: [],
         activeTag: '',
         displayTimezone: '{{ display_timezone|default:"UTC" }}',
 
@@ -464,7 +464,7 @@ function publishList() {
 
         reloadTab() {
             const params = new URLSearchParams();
-            if (this.activeChannel) params.set('channel', this.activeChannel);
+            this.selectedChannels.forEach(c => params.append('channel', c));
             if (this.activeTag) params.set('tag', this.activeTag);
             if (this.displayTimezone) params.set('tz', this.displayTimezone);
             const url = this.tabUrls[this.activeTab] + '?' + params.toString();

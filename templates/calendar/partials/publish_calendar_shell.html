@@ -82,16 +82,8 @@ Toolbar: nav arrows + period + Today + view dropdown | right: filter dropdowns.
                 </select>
             </div>
 
-            <!-- Channels filter -->
-            <div class="relative flex-shrink-0">
-                <svg class="cal-filter-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 006 0v-1a10 10 0 10-3.92 7.94"/></svg>
-                <select class="cal-filter-select has-icon" name="channel" x-model="calendarFilters.channel" @change="reloadCalendar()">
-                    <option value="">Channels</option>
-                    {% for acc in social_accounts %}
-                    <option value="{{ acc.id }}">{{ acc.account_name|default:acc.account_handle }}</option>
-                    {% endfor %}
-                </select>
-            </div>
+            <!-- Channels filter (multi-select) -->
+            {% include "calendar/partials/_channel_multiselect.html" with model="calendarFilters.channels" onchange="reloadCalendar()" accounts=social_accounts %}
 
             <!-- Tags filter -->
             <div class="relative flex-shrink-0">

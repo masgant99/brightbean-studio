@@ -97,15 +97,22 @@ def _parse_date(date_str, default=None):
     return default or date.today()
 
 
-def _get_valid_channel_filter(request):
-    """Return a UUID-safe channel filter value, or blank when malformed."""
-    channel = request.GET.get("channel", "").strip()
-    if not channel:
-        return ""
-    try:
-        return str(uuid.UUID(channel))
-    except (TypeError, ValueError, AttributeError):
-        return ""
+def _get_channel_filters(request):
+    """Return the list of UUID-safe channel (SocialAccount id) filter values.
+
+    The channels toolbar is a multi-select, so several ``channel`` params may be
+    present; malformed values are dropped. An empty list means "all channels".
+    """
+    out = []
+    for raw in request.GET.getlist("channel"):
+        raw = (raw or "").strip()
+        if not raw:
+            continue
+        try:
+            out.append(str(uuid.UUID(raw)))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return out
 
 
 def _get_filtered_posts(workspace, request):
@@ -184,9 +191,9 @@ def _get_filtered_platform_posts(workspace, request):
         qs = qs.filter(social_account__platform__in=platforms)
 
     # Channel filter (calendar toolbar sends the selected SocialAccount id).
-    channel = _get_valid_channel_filter(request)
-    if channel:
-        qs = qs.filter(social_account_id=channel)
+    channels = _get_channel_filters(request)
+    if channels:
+        qs = qs.filter(social_account_id__in=channels)
 
     # Author filter
     authors = request.GET.getlist("author")
@@ -237,9 +244,9 @@ def _get_calendar_slot_occurrences(workspace, request, display_tz, visible_dates
         social_account__connection_status=SocialAccount.ConnectionStatus.CONNECTED,
         is_active=True,
     )
-    channel = _get_valid_channel_filter(request)
-    if channel:
-        slots = slots.filter(social_account_id=channel)
+    channels = _get_channel_filters(request)
+    if channels:
+        slots = slots.filter(social_account_id__in=channels)
 
     slots = slots.select_related("social_account").order_by(
         "time",
@@ -387,9 +394,9 @@ def _get_publish_context(workspace, request):
 
 def _apply_pp_publish_filters(qs, request):
     """Apply channel and tag filters to a PlatformPost queryset."""
-    channel = request.GET.get("channel")
-    if channel:
-        qs = qs.filter(social_account_id=channel)
+    channels = _get_channel_filters(request)
+    if channels:
+        qs = qs.filter(social_account_id__in=channels)
 
     tag = request.GET.get("tag")
     if tag:
@@ -510,9 +517,9 @@ def _get_tab_context(request, workspace, tab: str) -> dict:
         pp_match = pp_match.filter(status=status_filter)
     else:
         pp_match = pp_match.filter(status__in=approval_statuses)
-    channel = request.GET.get("channel")
-    if channel:
-        pp_match = pp_match.filter(social_account_id=channel)
+    channels = _get_channel_filters(request)
+    if channels:
+        pp_match = pp_match.filter(social_account_id__in=channels)
 
     posts_qs = (
         Post.objects.for_workspace(workspace.id)
@@ -573,7 +580,9 @@ def _get_tab_context(request, workspace, tab: str) -> dict:
 
     # Preserve the active channel/tag/timezone filters across status pills and the
     # post-action self-refresh (otherwise acting on a post drops the filter).
-    filter_qs = urlencode({k: request.GET[k] for k in ("channel", "tag", "tz") if request.GET.get(k)})
+    _filter_params = [("channel", c) for c in _get_channel_filters(request)]
+    _filter_params += [(k, request.GET[k]) for k in ("tag", "tz") if request.GET.get(k)]
+    filter_qs = urlencode(_filter_params)
 
     return {
         **base_ctx,
