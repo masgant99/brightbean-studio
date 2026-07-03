@@ -317,6 +317,38 @@ def _cell_compose_params(display_date, hour, display_tz, workspace_tz):
     return workspace_dt.strftime("%Y-%m-%d"), workspace_dt.strftime("%H:%M")
 
 
+def _publish_tab_counts(workspace):
+    """The four Publish tab-bar badge counts (queue / drafts / approvals / sent).
+
+    Shared by the initial page render (`_get_publish_context`) and each HTMX
+    tab partial, so switching a tab can refresh all four badges out-of-band and
+    they never drift from the real data.
+    """
+    return {
+        "queue_count": PlatformPost.objects.filter(post__workspace_id=workspace.id, status="scheduled").count(),
+        "drafts_count": PlatformPost.objects.filter(post__workspace_id=workspace.id, status="draft").count(),
+        # Distinct posts (one row per post in the redesigned tab), incl. on_hold —
+        # matches the tab's "All" pill count.
+        "approvals_count": Post.objects.for_workspace(workspace.id)
+        .filter(
+            platform_posts__status__in=[
+                "pending_review",
+                "pending_client",
+                "approved",
+                "rejected",
+                "changes_requested",
+                "on_hold",
+            ]
+        )
+        .distinct()
+        .count(),
+        "sent_count": PlatformPost.objects.filter(
+            post__workspace_id=workspace.id,
+            status__in=["published", "failed"],
+        ).count(),
+    }
+
+
 def _get_publish_context(workspace, request):
     """Build shared context for the publish page (channels, tags, timezone)."""
     # Channels that have posts in this workspace
@@ -349,27 +381,7 @@ def _get_publish_context(workspace, request):
         "display_timezone": display_timezone,
         "timezone_choices": tz_list,
         "workspace_timezone": ws_tz,
-        "queue_count": PlatformPost.objects.filter(post__workspace_id=workspace.id, status="scheduled").count(),
-        "drafts_count": PlatformPost.objects.filter(post__workspace_id=workspace.id, status="draft").count(),
-        # Distinct posts (one row per post in the redesigned tab), incl. on_hold —
-        # matches the tab's "All" pill count.
-        "approvals_count": Post.objects.for_workspace(workspace.id)
-        .filter(
-            platform_posts__status__in=[
-                "pending_review",
-                "pending_client",
-                "approved",
-                "rejected",
-                "changes_requested",
-                "on_hold",
-            ]
-        )
-        .distinct()
-        .count(),
-        "sent_count": PlatformPost.objects.filter(
-            post__workspace_id=workspace.id,
-            status__in=["published", "failed"],
-        ).count(),
+        **_publish_tab_counts(workspace),
     }
 
 
@@ -593,6 +605,19 @@ def calendar_view(request, workspace_id):
     view_type = request.GET.get("view", "month")
     target_date = _parse_date(request.GET.get("date"))
 
+    # Whether "today" already falls inside the period the calendar is showing.
+    # Lets the toolbar render the Today button as a no-op instead of firing an
+    # unnecessary navigation/reload when the user is already on the current
+    # month/week/day.
+    today = date.today()
+    if view_type == "week":
+        week_start = target_date - timedelta(days=target_date.weekday())
+        is_today_in_view = week_start <= today <= week_start + timedelta(days=6)
+    elif view_type == "day":
+        is_today_in_view = target_date == today
+    else:  # month (and any fallback)
+        is_today_in_view = (target_date.year, target_date.month) == (today.year, today.month)
+
     # Connected accounts for calendar filter UI
     social_accounts = (
         SocialAccount.objects.for_workspace(workspace.id)
@@ -643,6 +668,7 @@ def calendar_view(request, workspace_id):
         "active_filters": active_filters,
         "status_choices": Post.Status.choices,
         "show_holidays": show_holidays,
+        "is_today_in_view": is_today_in_view,
         **publish_ctx,
     }
 
@@ -984,6 +1010,10 @@ def _render_tab(request, workspace, tab):
     """Shared HTMX-tab renderer used by the four `publish_tab_*` endpoints."""
     ctx = _get_tab_context(request, workspace, tab)
     ctx["is_htmx"] = True
+    # Refresh all four tab-bar badges out-of-band so counts stay in sync when a
+    # tab is switched or reloaded (they live outside the swapped #tab-content).
+    ctx.update(_publish_tab_counts(workspace))
+    ctx["render_tab_counts_oob"] = True
     return render(request, _TAB_TEMPLATES[tab], ctx)
 
 
