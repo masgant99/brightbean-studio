@@ -309,6 +309,9 @@
     .chip-ghost { display: none !important; }
     /* Highlight the day cell currently under the drag (toggled in onMove). */
     .cal-drop.cal-drop-active { background: #FFF7ED; box-shadow: inset 0 0 0 2px #F97316; }
+    /* While dragging, suppress the per-cell "+" add buttons that would otherwise
+       flicker under the cursor as it crosses cells. */
+    body.cal-dragging .cal-add-btn { display: none !important; }
 
     @keyframes slideUp {
         from { opacity: 0; transform: translateY(8px); }
@@ -389,17 +392,24 @@ function calendarApp() {
                     draggable: '.post-chip.is-draggable',
                     animation: 150,
                     ghostClass: 'chip-ghost',
-                    chosenClass: 'chip-chosen',
-                    // Use the mouse-based fallback so the browser's native
-                    // anchor-drag (dragging the link URL) never kicks in.
-                    forceFallback: true,
-                    fallbackOnBody: true,
-                    fallbackTolerance: 3,
+                    // Native HTML5 drag: the browser renders a drag image that
+                    // reliably follows the cursor (a forceFallback clone did
+                    // not — it appeared stuck near the origin). We set that image
+                    // explicitly to the chip and clear the drag data so an <a>
+                    // chip never drags its URL instead of itself.
+                    setData: (dataTransfer, dragEl) => {
+                        try { dataTransfer.setDragImage(dragEl, 20, 12); } catch (e) {}
+                        dataTransfer.setData('text/plain', '');
+                    },
                     // Touch: short hold before a drag begins so it doesn't
                     // hijack a scroll. Desktop mouse is unaffected (immediate).
                     delay: 150,
                     delayOnTouchOnly: true,
-                    onStart: () => { this._draggingChip = true; },
+                    onStart: () => {
+                        this._draggingChip = true;
+                        // Suppress the per-cell "+" add buttons while dragging.
+                        document.body.classList.add('cal-dragging');
+                    },
                     onMove: (evt) => {
                         // Highlight only the day cell currently under the drag.
                         document.querySelectorAll('.cal-drop.cal-drop-active').forEach(c => c.classList.remove('cal-drop-active'));
@@ -407,6 +417,7 @@ function calendarApp() {
                         return true;
                     },
                     onEnd: (evt) => {
+                        document.body.classList.remove('cal-dragging');
                         document.querySelectorAll('.cal-drop.cal-drop-active').forEach(c => c.classList.remove('cal-drop-active'));
                         setTimeout(() => { this._draggingChip = false; }, 60);
                         if (evt.to === evt.from) return; // dropped back in place
