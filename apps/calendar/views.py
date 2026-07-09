@@ -1123,6 +1123,75 @@ def reschedule_post(request, workspace_id):
 
 
 @login_required
+@require_POST
+def bulk_platform_action(request, workspace_id):
+    """Bulk draft / delete / publish on the checkbox-selected PlatformPosts.
+
+    Powers the Publish page's floating selection bar (list + calendar). Only
+    rows the user may edit are touched, and ``published``/``publishing`` rows
+    are never deleted or moved. Returns 204 + an HX-Trigger so the calendar and
+    tab counts refresh.
+    """
+    from django.utils import timezone as _tz
+
+    from apps.composer.services import sync_post_scheduled_at
+
+    workspace = _get_workspace(request, workspace_id)
+    action = request.POST.get("action")
+    pp_ids = request.POST.getlist("platform_post_ids")
+    if action not in ("draft", "delete", "publish") or not pp_ids:
+        return JsonResponse({"error": "action and platform_post_ids required"}, status=400)
+
+    pps = list(
+        PlatformPost.objects.filter(id__in=pp_ids, post__workspace=workspace).select_related("post")
+    )
+    membership = getattr(request, "workspace_membership", None)
+    perms = membership.effective_permissions if membership else {}
+    can_edit_others = perms.get("edit_others_posts")
+    pps = [pp for pp in pps if pp.post.author_id == request.user.id or can_edit_others]
+
+    affected = set()
+    count = 0
+    if action == "delete":
+        for pp in pps:
+            if pp.status in PlatformPost.PROTECTED_STATUSES:
+                continue
+            affected.add(pp.post_id)
+            pp.delete()
+            count += 1
+    else:
+        # draft → unschedule; publish → schedule at now so the worker picks it up.
+        target = "draft" if action == "draft" else "scheduled"
+        new_dt = None if action == "draft" else _tz.now()
+        for pp in pps:
+            if pp.status in PlatformPost.PROTECTED_STATUSES or pp.status == target and action != "publish":
+                continue
+            if not pp.can_transition_to(target):
+                continue
+            pp.scheduled_at = new_dt
+            pp.transition_to(target)
+            pp.save(update_fields=["status", "scheduled_at", "updated_at"])
+            affected.add(pp.post_id)
+            count += 1
+
+    # Reconcile each touched parent Post (aggregate scheduled_at) and drop any
+    # post whose last platform row was just deleted.
+    for pid in affected:
+        post = Post.objects.filter(id=pid, workspace=workspace).first()
+        if not post:
+            continue
+        if not post.platform_posts.exists():
+            post.delete()
+        else:
+            sync_post_scheduled_at(post)
+
+    return HttpResponse(
+        status=204,
+        headers={"HX-Trigger": json.dumps({"bulkActionDone": {"action": action, "count": count}, "calendarRefresh": True})},
+    )
+
+
+@login_required
 def posting_slots(request, workspace_id):
     """Manage posting slots for a workspace's social accounts."""
     workspace = _get_workspace(request, workspace_id)

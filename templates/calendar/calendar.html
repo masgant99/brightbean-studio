@@ -313,6 +313,22 @@
        flicker under the cursor as it crosses cells. */
     body.cal-dragging .cal-add-btn { display: none !important; }
 
+    /* Bulk-selection checkbox (chips + list rows). Hover-reveal on chips; always
+       shown once checked or when a selection is active. */
+    .cal-select-box {
+        width: 15px; height: 15px; flex-shrink: 0; border: 1.5px solid #A8A29E;
+        border-radius: 4px; background: #fff; cursor: pointer; color: #fff;
+        display: inline-flex; align-items: center; justify-content: center;
+        opacity: 0; transition: opacity 120ms ease, background 120ms ease;
+    }
+    .post-chip:hover .cal-select-box,
+    .cal-select-box.is-checked,
+    body.has-selection .cal-select-box { opacity: 1; }
+    .cal-select-box.is-checked { background: #F97316; border-color: #F97316; }
+    .cal-select-box:hover { border-color: #F97316; }
+    /* In list rows the checkbox is always visible (there's room). */
+    .row-select-box { opacity: 1; }
+
     @keyframes slideUp {
         from { opacity: 0; transform: translateY(8px); }
         to   { opacity: 1; transform: translateY(0); }
@@ -333,10 +349,66 @@
 </div>
 {# Toast host — outside #tab-content so an approval action's list refresh doesn't tear down the toast #}
 {% include "approvals/partials/_toasts.html" %}
+
+{% comment %}Floating bulk-selection bar — outside the swapped regions so the
+selection survives grid reloads / tab switches. Shown when ≥1 chip/row is
+ticked (see the `sel` Alpine store).{% endcomment %}
+<div x-data="bulkBar()" x-cloak x-show="$store.sel.count > 0"
+     x-effect="document.body.classList.toggle('has-selection', $store.sel.count > 0)"
+     class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] flex items-center gap-1 bg-stone-900 text-white rounded-full shadow-2xl pl-4 pr-2 py-2">
+    <span class="text-sm font-medium whitespace-nowrap" x-text="$store.sel.count + ' selected'"></span>
+    <span class="w-px h-5 bg-white/20 mx-1.5"></span>
+    <button @click="run('draft')" :disabled="busy" class="px-3 py-1.5 text-xs font-semibold rounded-full hover:bg-white/10 transition-colors disabled:opacity-50">Draft</button>
+    <button @click="run('publish')" :disabled="busy" class="px-3 py-1.5 text-xs font-semibold rounded-full bg-emerald-500 hover:bg-emerald-600 transition-colors disabled:opacity-50">Publish</button>
+    <button @click="run('delete')" :disabled="busy" class="px-3 py-1.5 text-xs font-semibold rounded-full text-red-300 hover:bg-red-500/20 transition-colors disabled:opacity-50">Delete</button>
+    <button @click="$store.sel.clear()" class="w-7 h-7 rounded-full hover:bg-white/10 flex items-center justify-center transition-colors" title="Clear selection">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+    </button>
+</div>
 {% endblock %}
 
 {% block extra_js %}
 <script nonce="{{ request.csp_nonce }}">
+/* Bulk-selection store (survives HTMX grid/tab swaps) + floating-bar controller. */
+document.addEventListener('alpine:init', () => {
+    Alpine.store('sel', {
+        ids: [],
+        has(id) { return this.ids.includes(id); },
+        toggle(id) { const i = this.ids.indexOf(id); if (i >= 0) this.ids.splice(i, 1); else this.ids.push(id); },
+        clear() { this.ids = []; },
+        get count() { return this.ids.length; },
+    });
+});
+function bulkBar() {
+    return {
+        busy: false,
+        run(action) {
+            const store = Alpine.store('sel');
+            if (!store.count || this.busy) return;
+            if (action === 'delete' && !confirm(`Delete ${store.count} post(s)? This can't be undone.`)) return;
+            this.busy = true;
+            const csrf = (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value
+                || (document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/) || [])[1] || '';
+            const body = new URLSearchParams();
+            body.set('action', action);
+            store.ids.forEach(id => body.append('platform_post_ids', id));
+            fetch('{% url "calendar:bulk_platform_action" workspace_id=workspace.id %}', {
+                method: 'POST',
+                headers: { 'X-CSRFToken': csrf, 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded' },
+                body,
+            }).then((res) => {
+                this.busy = false;
+                if (!res.ok) return;
+                store.clear();
+                // Refresh whichever view is mounted: the calendar shell reloads
+                // its grid on `calendarRefresh` (from body); publishList reloads
+                // the active tab on the `post-deleted` window event.
+                if (window.htmx) htmx.trigger(document.body, 'calendarRefresh');
+                window.dispatchEvent(new CustomEvent('post-deleted'));
+            }).catch(() => { this.busy = false; });
+        },
+    };
+}
 function calendarApp() {
     return {
         activeView: '{{ view_type }}',
