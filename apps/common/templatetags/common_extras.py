@@ -59,6 +59,12 @@ def ui_select(
     for o in options:
         if isinstance(o, dict):
             value, label, icon = o.get("value"), o.get("label"), o.get("icon")
+        elif isinstance(o, (tuple, list)) and len(o) >= 2:
+            # (value, label) pairs, e.g. Django `choices`.
+            value, label, icon = o[0], o[1], None
+        elif isinstance(o, str):
+            value = label = o
+            icon = None
         else:
             value = getattr(o, value_field, None)
             label = getattr(o, label_field) if label_field else str(o)

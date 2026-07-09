@@ -1,4 +1,4 @@
-{% comment %}
+{% load common_extras %}{% comment %}
 Calendar mode shell for the Publish page.
 Toolbar: nav arrows + period + Today + view dropdown | right: filter dropdowns.
 {% endcomment %}
@@ -72,29 +72,13 @@ Toolbar: nav arrows + period + Today + view dropdown | right: filter dropdowns.
         <!-- Right side: filter dropdowns -->
         <div class="cal-filters-scroll flex items-center gap-2 ml-auto overflow-x-auto flex-nowrap" style="-webkit-overflow-scrolling: touch; scrollbar-width: none;">
             <!-- Status filter -->
-            <div class="relative flex-shrink-0">
-                <svg class="cal-filter-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
-                <select class="cal-filter-select has-icon" name="status" x-model="calendarFilters.status" @change="reloadCalendar()">
-                    <option value="">All Posts</option>
-                    {% for value, label in status_choices %}
-                    <option value="{{ value }}" {% if value in active_filters.statuses %}selected{% endif %}>{{ label }}</option>
-                    {% endfor %}
-                </select>
-            </div>
+            {% ui_select model="calendarFilters.status" options=status_choices onchange="reloadCalendar()" placeholder="All Posts" %}
 
             <!-- Channels filter (multi-select) -->
             {% include "calendar/partials/_channel_multiselect.html" with model="calendarFilters.channels" onchange="reloadCalendar()" accounts=social_accounts %}
 
             <!-- Tags filter -->
-            <div class="relative flex-shrink-0">
-                <svg class="cal-filter-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>
-                <select class="cal-filter-select has-icon" name="tag" x-model="calendarFilters.tag" @change="reloadCalendar()">
-                    <option value="">Tags</option>
-                    {% for tag in all_tags %}
-                    <option value="{{ tag }}" {% if tag in active_filters.tags %}selected{% endif %}>#{{ tag }}</option>
-                    {% endfor %}
-                </select>
-            </div>
+            {% ui_select model="calendarFilters.tag" options=all_tags onchange="reloadCalendar()" placeholder="Tags" %}
 
             <!-- Timezone -->
             <div class="relative flex-shrink-0">
