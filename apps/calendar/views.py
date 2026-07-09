@@ -1142,9 +1142,7 @@ def bulk_platform_action(request, workspace_id):
     if action not in ("draft", "delete", "publish") or not pp_ids:
         return JsonResponse({"error": "action and platform_post_ids required"}, status=400)
 
-    pps = list(
-        PlatformPost.objects.filter(id__in=pp_ids, post__workspace=workspace).select_related("post")
-    )
+    pps = list(PlatformPost.objects.filter(id__in=pp_ids, post__workspace=workspace).select_related("post"))
     membership = getattr(request, "workspace_membership", None)
     perms = membership.effective_permissions if membership else {}
     can_edit_others = perms.get("edit_others_posts")
@@ -1187,7 +1185,9 @@ def bulk_platform_action(request, workspace_id):
 
     return HttpResponse(
         status=204,
-        headers={"HX-Trigger": json.dumps({"bulkActionDone": {"action": action, "count": count}, "calendarRefresh": True})},
+        headers={
+            "HX-Trigger": json.dumps({"bulkActionDone": {"action": action, "count": count}, "calendarRefresh": True})
+        },
     )
 
 
