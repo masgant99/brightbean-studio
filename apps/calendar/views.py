@@ -386,11 +386,21 @@ def _get_publish_context(workspace, request):
         if tz not in tz_list:
             tz_list.append(tz)
 
+    # Pre-format options for the ui_select component: short label + workspace hint
+    tz_options = [
+        {
+            "value": tz,
+            "label": tz.split("/")[-1] + (" (workspace)" if tz == ws_tz else ""),
+        }
+        for tz in tz_list
+    ]
+
     return {
         "channels_with_posts": channels_with_posts,
         "all_tags": sorted(all_tags),
         "display_timezone": display_timezone,
         "timezone_choices": tz_list,
+        "timezone_options": tz_options,
         "workspace_timezone": ws_tz,
         **_publish_tab_counts(workspace),
     }
