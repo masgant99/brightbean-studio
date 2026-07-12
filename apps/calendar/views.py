@@ -1169,16 +1169,38 @@ def bulk_platform_action(request, workspace_id):
             count += 1
     else:
         # draft → unschedule; publish → schedule at now so the worker picks it up.
-        target = "draft" if action == "draft" else "scheduled"
-        new_dt = None if action == "draft" else _tz.now()
+        is_publish = action == "publish"
+        target = "scheduled" if is_publish else "draft"
+        new_dt = _tz.now() if is_publish else None
+
+        # Scheduling for immediate publish is a direct-publish action, so it must
+        # clear the same bar the composer enforces for scheduling — the
+        # ``publish_directly`` permission (see the per-chip ``transition_platform_post``
+        # view and ``save_post`` "publish_now" in apps/composer/views.py). Without
+        # this an editor/contributor (edit rights but no publish_directly) could
+        # bulk-publish their own drafts and skip the approval workflow. Drafting
+        # (unscheduling) is only an edit, so it stays under the edit check above.
+        if is_publish and not perms.get("publish_directly", False):
+            return JsonResponse({"error": "You do not have permission to publish directly."}, status=403)
+
         for pp in pps:
-            if pp.status in PlatformPost.PROTECTED_STATUSES or pp.status == target and action != "publish":
+            if pp.status in PlatformPost.PROTECTED_STATUSES:
                 continue
-            if not pp.can_transition_to(target):
-                continue
-            pp.scheduled_at = new_dt
-            pp.transition_to(target)
-            pp.save(update_fields=["status", "scheduled_at", "updated_at"])
+            if pp.status == target:
+                # Already in the target editorial state. For publish, still pull
+                # the time forward so an already-``scheduled`` row (the Queue tab's
+                # main content) goes out now — a bare status transition would be
+                # invalid (scheduled→scheduled) and silently do nothing.
+                if not is_publish:
+                    continue
+                pp.scheduled_at = new_dt
+                pp.save(update_fields=["scheduled_at", "updated_at"])
+            else:
+                if not pp.can_transition_to(target):
+                    continue
+                pp.scheduled_at = new_dt
+                pp.transition_to(target)
+                pp.save(update_fields=["status", "scheduled_at", "updated_at"])
             affected.add(pp.post_id)
             count += 1
 

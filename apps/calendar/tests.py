@@ -1275,3 +1275,112 @@ class QueueEntryEndpointTests(TestCase):
         self.assertContains(resp, "Remove from queue")
         body = resp.content.decode()
         self.assertLess(body.index("EARLIER caption"), body.index("LATER caption"))
+
+
+class BulkPlatformActionTests(TestCase):
+    """The Publish page's floating bulk bar (draft / publish / delete).
+
+    Publishing is a direct-publish action and must be gated on the
+    ``publish_directly`` permission just like the composer's per-chip transition
+    and "Publish now" — otherwise an editor could bulk-publish drafts and skip
+    the approval workflow. Drafting and deleting stay under edit rights.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Bulk Org", default_timezone="UTC")
+        self.workspace = Workspace.objects.create(organization=self.org, name="Bulk WS")
+        self.owner = User.objects.create_user(
+            email="owner@bulk.test", password="pw", tos_accepted_at=timezone.now()
+        )
+        WorkspaceMembership.objects.create(
+            user=self.owner, workspace=self.workspace, workspace_role=WorkspaceMembership.WorkspaceRole.OWNER
+        )
+        self.editor = User.objects.create_user(
+            email="editor@bulk.test", password="pw", tos_accepted_at=timezone.now()
+        )
+        WorkspaceMembership.objects.create(
+            user=self.editor, workspace=self.workspace, workspace_role=WorkspaceMembership.WorkspaceRole.EDITOR
+        )
+        self.account = SocialAccount.objects.create(
+            workspace=self.workspace,
+            platform="linkedin_personal",
+            account_platform_id="li-bulk",
+            account_name="Bulk",
+            connection_status=SocialAccount.ConnectionStatus.CONNECTED,
+        )
+
+    def _pp(self, status, *, scheduled_at=None, author=None):
+        post = Post.objects.create(workspace=self.workspace, caption=f"c-{status}", author=author)
+        return PlatformPost.objects.create(
+            post=post, social_account=self.account, status=status, scheduled_at=scheduled_at
+        )
+
+    def _post(self, user, action, pp_ids):
+        self.client.force_login(user)
+        url = reverse("calendar:bulk_platform_action", kwargs={"workspace_id": self.workspace.id})
+        return self.client.post(url, {"action": action, "platform_post_ids": pp_ids})
+
+    def test_editor_cannot_bulk_publish(self):
+        """An editor lacks publish_directly, so bulk publish is refused (403)."""
+        pp = self._pp(PlatformPost.Status.DRAFT)
+        resp = self._post(self.editor, "publish", [str(pp.id)])
+        self.assertEqual(resp.status_code, 403)
+        pp.refresh_from_db()
+        self.assertEqual(pp.status, PlatformPost.Status.DRAFT)
+
+    def test_owner_bulk_publish_schedules_draft(self):
+        pp = self._pp(PlatformPost.Status.DRAFT)
+        resp = self._post(self.owner, "publish", [str(pp.id)])
+        self.assertEqual(resp.status_code, 204)
+        pp.refresh_from_db()
+        self.assertEqual(pp.status, PlatformPost.Status.SCHEDULED)
+        self.assertIsNotNone(pp.scheduled_at)
+
+    def test_bulk_publish_pulls_forward_already_scheduled(self):
+        """Publish-now on a future scheduled row moves its time to ~now.
+
+        Regression: scheduled→scheduled is not a valid transition, so the naive
+        implementation silently skipped these (the Queue tab's main content).
+        """
+        future = timezone.now() + timedelta(days=10)
+        pp = self._pp(PlatformPost.Status.SCHEDULED, scheduled_at=future)
+        resp = self._post(self.owner, "publish", [str(pp.id)])
+        self.assertEqual(resp.status_code, 204)
+        pp.refresh_from_db()
+        self.assertEqual(pp.status, PlatformPost.Status.SCHEDULED)
+        self.assertLess(pp.scheduled_at, future)
+        self.assertLess(pp.scheduled_at, timezone.now() + timedelta(minutes=1))
+
+    def test_bulk_publish_skips_pending_review(self):
+        """A pending_review post can't be force-published — approval is preserved."""
+        pp = self._pp(PlatformPost.Status.PENDING_REVIEW)
+        resp = self._post(self.owner, "publish", [str(pp.id)])
+        self.assertEqual(resp.status_code, 204)
+        pp.refresh_from_db()
+        self.assertEqual(pp.status, PlatformPost.Status.PENDING_REVIEW)
+
+    def test_editor_can_bulk_draft(self):
+        """Drafting (unscheduling) only needs edit rights, not publish_directly."""
+        pp = self._pp(PlatformPost.Status.SCHEDULED, scheduled_at=timezone.now())
+        resp = self._post(self.editor, "draft", [str(pp.id)])
+        self.assertEqual(resp.status_code, 204)
+        pp.refresh_from_db()
+        self.assertEqual(pp.status, PlatformPost.Status.DRAFT)
+        self.assertIsNone(pp.scheduled_at)
+
+    def test_bulk_delete_skips_published_and_removes_orphan(self):
+        published = self._pp(PlatformPost.Status.PUBLISHED)
+        draft = self._pp(PlatformPost.Status.DRAFT)
+        draft_post_id = draft.post_id
+        resp = self._post(self.owner, "delete", [str(published.id), str(draft.id)])
+        self.assertEqual(resp.status_code, 204)
+        # Published row (protected) survives; draft row is deleted.
+        self.assertTrue(PlatformPost.objects.filter(id=published.id).exists())
+        self.assertFalse(PlatformPost.objects.filter(id=draft.id).exists())
+        # The draft's parent Post had no other platform rows → cleaned up.
+        self.assertFalse(Post.objects.filter(id=draft_post_id).exists())
+
+    def test_bulk_action_requires_valid_action_and_ids(self):
+        pp = self._pp(PlatformPost.Status.DRAFT)
+        self.assertEqual(self._post(self.owner, "bogus", [str(pp.id)]).status_code, 400)
+        self.assertEqual(self._post(self.owner, "publish", []).status_code, 400)
