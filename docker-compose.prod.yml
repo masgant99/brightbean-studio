@@ -6,7 +6,7 @@ services:
       - .env
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.production
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/brightbean
+      - DATABASE_URL=postgres://postgres:2rT5KtV0K203MUFJOGrq12qhkB7p6apU@postgres:5432/medsos
     depends_on:
       postgres:
         condition: service_healthy
