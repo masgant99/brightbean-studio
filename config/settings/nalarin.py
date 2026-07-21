@@ -21,3 +21,12 @@ from .production import *  # noqa: F401, F403
 # Cookies stay Secure/HttpOnly (inherited from production.py) since browsers
 # only ever reach this app over the public https:// origin.
 SECURE_SSL_REDIRECT = False
+
+# Same root cause bites Django's CSRF Origin check: Django derives its own
+# expected scheme from request.is_secure() (which reads X-Forwarded-Proto -
+# always "http" here per the note above), then compares that against the
+# browser's real `Origin: https://medsos.nalar.army` header on every POST.
+# Scheme mismatch -> "CSRF verification failed" on every form submit,
+# including login. Listing the real public origin here makes Django trust
+# it explicitly instead of trying to derive it from the (wrong) proxy header.
+CSRF_TRUSTED_ORIGINS = ["https://medsos.nalar.army"]
